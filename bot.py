@@ -3,7 +3,8 @@ import time
 import json
 import hashlib
 import requests
-from datetime import datetime, timezone
+import sqlite3
+from datetime import datetime, timezone, timedelta
 from xml.etree import ElementTree
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
@@ -11,6 +12,7 @@ CHAT_ID = os.environ.get("CHAT_ID", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 INTERVAL = int(os.environ.get("INTERVAL_MINUTES", "3"))
 POLY_INTERVAL = int(os.environ.get("POLY_INTERVAL_MINUTES", "5"))
+MIN_SCORE = int(os.environ.get("MIN_SCORE", "7"))
 
 TG_URL = f"https://api.telegram.org/bot{TOKEN}"
 POLYMARKET_URL = "https://gamma-api.polymarket.com/markets?limit=50&active=true&closed=false&order=volume&ascending=false"
@@ -20,75 +22,111 @@ seen_signals = set()
 markets_cache = []
 last_poly_check = 0
 
-# ─── SOURCES D'INFORMATION BRUTES ───────────────────────────────────────────
+# ─── BASE DE DONNÉES HISTORIQUE ──────────────────────────────────────────────
+
+def init_db():
+    conn = sqlite3.connect("/tmp/alerts.db")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS alerts (
+            id TEXT PRIMARY KEY,
+            timestamp TEXT,
+            source TEXT,
+            title TEXT,
+            market_title TEXT,
+            market_prob INTEGER,
+            market_delta INTEGER,
+            score INTEGER,
+            sent INTEGER DEFAULT 1
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS market_snapshots (
+            alert_id TEXT,
+            market_id TEXT,
+            prob_before INTEGER,
+            prob_after INTEGER,
+            checked_at TEXT
+        )
+    """)
+    conn.commit()
+    return conn
+
+def save_alert(conn, alert_id, source, title, markets, score):
+    try:
+        market_title = markets[0]["title"] if markets else ""
+        market_prob = markets[0]["prob"] if markets else 0
+        market_delta = markets[0]["delta"] if markets else 0
+        conn.execute("""
+            INSERT OR IGNORE INTO alerts
+            (id, timestamp, source, title, market_title, market_prob, market_delta, score, sent)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+        """, (alert_id, datetime.now(timezone.utc).isoformat(), source, title, market_title, market_prob, market_delta, score))
+        conn.commit()
+    except Exception as e:
+        log(f"DB save error: {e}")
+
+def get_daily_stats(conn):
+    try:
+        since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        cur = conn.execute("SELECT COUNT(*), AVG(score) FROM alerts WHERE timestamp > ? AND sent=1", (since,))
+        row = cur.fetchone()
+        count = row[0] or 0
+        avg_score = round(row[1] or 0, 1)
+        cur2 = conn.execute("SELECT source, COUNT(*) as c FROM alerts WHERE timestamp > ? GROUP BY source ORDER BY c DESC LIMIT 5", (since,))
+        top_sources = cur2.fetchall()
+        return count, avg_score, top_sources
+    except:
+        return 0, 0, []
+
+# ─── SOURCES ─────────────────────────────────────────────────────────────────
 
 SOURCES = [
     # GÉOPOLITIQUE
-    {"name": "Reuters Top News",     "cat": "geo",      "url": "https://feeds.reuters.com/reuters/topNews"},
-    {"name": "AP World",             "cat": "geo",      "url": "https://rsshub.app/apnews/topics/apf-topnews"},
-    {"name": "Al Jazeera",           "cat": "geo",      "url": "https://www.aljazeera.com/xml/rss/all.xml"},
-    {"name": "BBC World",            "cat": "geo",      "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
-    {"name": "DW News",              "cat": "geo",      "url": "https://rss.dw.com/rdf/rss-en-all"},
-    {"name": "UN News",              "cat": "geo",      "url": "https://news.un.org/feed/subscribe/en/news/all/rss.xml"},
-    {"name": "Foreign Affairs",      "cat": "geo",      "url": "https://www.foreignaffairs.com/rss.xml"},
-    {"name": "The Guardian World",   "cat": "geo",      "url": "https://www.theguardian.com/world/rss"},
+    {"name": "Reuters",          "cat": "geo",       "url": "https://feeds.reuters.com/reuters/topNews"},
+    {"name": "AP News",          "cat": "geo",       "url": "https://rsshub.app/apnews/topics/apf-topnews"},
+    {"name": "Al Jazeera",       "cat": "geo",       "url": "https://www.aljazeera.com/xml/rss/all.xml"},
+    {"name": "BBC World",        "cat": "geo",       "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
+    {"name": "DW News",          "cat": "geo",       "url": "https://rss.dw.com/rdf/rss-en-all"},
+    {"name": "UN News",          "cat": "geo",       "url": "https://news.un.org/feed/subscribe/en/news/all/rss.xml"},
+    {"name": "The Guardian",     "cat": "geo",       "url": "https://www.theguardian.com/world/rss"},
+    {"name": "Foreign Affairs",  "cat": "geo",       "url": "https://www.foreignaffairs.com/rss.xml"},
     # POLITIQUE
-    {"name": "Politico",             "cat": "politics", "url": "https://rss.politico.com/politics-news.xml"},
-    {"name": "The Hill",             "cat": "politics", "url": "https://thehill.com/news/feed/"},
-    {"name": "RFI",                  "cat": "politics", "url": "https://www.rfi.fr/fr/rss-podcasts/rss_actualites.xml"},
-    {"name": "Le Monde",             "cat": "politics", "url": "https://www.lemonde.fr/rss/une.xml"},
+    {"name": "Politico",         "cat": "politics",  "url": "https://rss.politico.com/politics-news.xml"},
+    {"name": "The Hill",         "cat": "politics",  "url": "https://thehill.com/news/feed/"},
+    {"name": "RFI",              "cat": "politics",  "url": "https://www.rfi.fr/fr/rss-podcasts/rss_actualites.xml"},
+    {"name": "Le Monde",         "cat": "politics",  "url": "https://www.lemonde.fr/rss/une.xml"},
     # CRYPTO
-    {"name": "CoinDesk",             "cat": "crypto",   "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
-    {"name": "Cointelegraph",        "cat": "crypto",   "url": "https://cointelegraph.com/rss"},
-    {"name": "The Block",            "cat": "crypto",   "url": "https://www.theblock.co/rss.xml"},
-    {"name": "Decrypt",              "cat": "crypto",   "url": "https://decrypt.co/feed"},
-    {"name": "Bitcoin Magazine",     "cat": "crypto",   "url": "https://bitcoinmagazine.com/feed"},
-    # ÉCONOMIE
-    {"name": "MarketWatch",          "cat": "economics","url": "https://feeds.content.dowjones.io/public/rss/mw_topstories"},
-    {"name": "Les Echos",            "cat": "economics","url": "https://services.lesechos.fr/rss/les-echos-finance.xml"},
-    {"name": "Bloomberg Markets",    "cat": "economics","url": "https://feeds.bloomberg.com/markets/news.rss"},
-    {"name": "Financial Times",      "cat": "economics","url": "https://www.ft.com/rss/home"},
-    {"name": "The Economist",        "cat": "economics","url": "https://www.economist.com/latest/rss.xml"},
+    {"name": "CoinDesk",         "cat": "crypto",    "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
+    {"name": "Cointelegraph",    "cat": "crypto",    "url": "https://cointelegraph.com/rss"},
+    {"name": "The Block",        "cat": "crypto",    "url": "https://www.theblock.co/rss.xml"},
+    {"name": "Decrypt",          "cat": "crypto",    "url": "https://decrypt.co/feed"},
+    {"name": "Bitcoin Magazine", "cat": "crypto",    "url": "https://bitcoinmagazine.com/feed"},
+    # ÉCONOMIE + SOURCES OFFICIELLES
+    {"name": "MarketWatch",      "cat": "economics", "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories"},
+    {"name": "Les Echos",        "cat": "economics", "url": "https://services.lesechos.fr/rss/les-echos-finance.xml"},
+    {"name": "Bloomberg",        "cat": "economics", "url": "https://feeds.bloomberg.com/markets/news.rss"},
+    {"name": "Financial Times",  "cat": "economics", "url": "https://www.ft.com/rss/home"},
+    {"name": "The Economist",    "cat": "economics", "url": "https://www.economist.com/latest/rss.xml"},
+    # SOURCES OFFICIELLES ULTRA-RAPIDES
+    {"name": "Fed Reserve",      "cat": "economics", "url": "https://www.federalreserve.gov/feeds/press_all.xml"},
+    {"name": "White House",      "cat": "politics",  "url": "https://www.whitehouse.gov/feed/"},
+    {"name": "SEC",              "cat": "crypto",    "url": "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=&dateb=&owner=include&count=10&search_text=&output=atom"},
+    {"name": "NATO",             "cat": "geo",       "url": "https://www.nato.int/cps/en/natohq/news.xml"},
+    {"name": "IMF",              "cat": "economics", "url": "https://www.imf.org/en/News/rss?language=eng"},
+    # TELEGRAM CHANNELS (via RSSHub)
+    {"name": "@BreakingNews",    "cat": "geo",       "url": "https://rsshub.app/telegram/channel/BreakingNews"},
+    {"name": "@disclosetv",      "cat": "geo",       "url": "https://rsshub.app/telegram/channel/disclosetv"},
+    {"name": "@sentdefender",    "cat": "geo",       "url": "https://rsshub.app/telegram/channel/sentdefender"},
+    {"name": "@IntelSlava",      "cat": "geo",       "url": "https://rsshub.app/telegram/channel/IntelSlava"},
+    {"name": "@BBCBreaking",     "cat": "geo",       "url": "https://rsshub.app/telegram/channel/BBCBreaking"},
+    {"name": "@CoinDeskNews",    "cat": "crypto",    "url": "https://rsshub.app/telegram/channel/CoinDeskNews"},
+    {"name": "@Cointelegraph",   "cat": "crypto",    "url": "https://rsshub.app/telegram/channel/cointelegraph"},
     # REDDIT
-    {"name": "r/worldnews",          "cat": "geo",      "url": "https://www.reddit.com/r/worldnews/hot.json?limit=15", "type": "reddit"},
-    {"name": "r/geopolitics",        "cat": "geo",      "url": "https://www.reddit.com/r/geopolitics/hot.json?limit=10", "type": "reddit"},
-    {"name": "r/CryptoCurrency",     "cat": "crypto",   "url": "https://www.reddit.com/r/CryptoCurrency/hot.json?limit=10", "type": "reddit"},
-    {"name": "r/investing",          "cat": "economics","url": "https://www.reddit.com/r/investing/hot.json?limit=10", "type": "reddit"},
-    {"name": "r/politics",           "cat": "politics", "url": "https://www.reddit.com/r/politics/hot.json?limit=10", "type": "reddit"},
-    {"name": "r/Polymarket",         "cat": "all",      "url": "https://www.reddit.com/r/Polymarket/hot.json?limit=10", "type": "reddit"},
-    # TELEGRAM CHANNELS (via RSS Bridge)
-    {"name": "@BreakingNews",    "cat": "geo",      "url": "https://rsshub.app/telegram/channel/BreakingNews"},
-    {"name": "@disclosetv",      "cat": "geo",      "url": "https://rsshub.app/telegram/channel/disclosetv"},
-    {"name": "@sentdefender",    "cat": "geo",      "url": "https://rsshub.app/telegram/channel/sentdefender"},
-    {"name": "@IntelSlava",      "cat": "geo",      "url": "https://rsshub.app/telegram/channel/IntelSlava"},
-    {"name": "@warnewsua",       "cat": "geo",      "url": "https://rsshub.app/telegram/channel/warnewsua"},
-    {"name": "@Reuters",         "cat": "geo",      "url": "https://rsshub.app/telegram/channel/Reuters"},
-    {"name": "@BBCBreaking",     "cat": "geo",      "url": "https://rsshub.app/telegram/channel/BBCBreaking"},
-    {"name": "@CoinDeskNews",    "cat": "crypto",   "url": "https://rsshub.app/telegram/channel/CoinDeskNews"},
-    {"name": "@Cointelegraph",   "cat": "crypto",   "url": "https://rsshub.app/telegram/channel/cointelegraph"},
-    {"name": "@MarketWatch",     "cat": "economics","url": "https://rsshub.app/telegram/channel/MarketWatch"},
-]
-
-# Mots-clés à haute valeur qui signalent une info exploitable
-HIGH_VALUE_KEYWORDS = [
-    # Géopolitique
-    "attack","strike","missile","troops","invasion","ceasefire","war","nuclear",
-    "sanction","embargo","coup","assassination","explosion","airspace","closed",
-    "troops","deployed","escalat","conflict","bomb","rocket","drone",
-    # Politique
-    "resign","impeach","elect","vote","poll","president","prime minister",
-    "emergency","arrest","indicted","guilty","verdict","trial","ban",
-    "executive order","law passed","veto","senate","congress",
-    # Crypto
-    "hack","exploit","crash","surge","etf approved","sec","regulation",
-    "ban","listing","delisting","bankruptcy","seized","halted",
-    # Économie
-    "rate hike","rate cut","inflation","recession","gdp","unemployment",
-    "fed","ecb","interest rate","default","crisis","bailout","tariff",
-    "sanctions","trade war","deficit","surplus",
-    # Signaux urgents
-    "breaking","urgent","alert","flash","developing","just in","confirmed",
-    "official","announces","declares","signs","agrees","rejects",
+    {"name": "r/worldnews",      "cat": "geo",       "url": "https://www.reddit.com/r/worldnews/hot.json?limit=15", "type": "reddit"},
+    {"name": "r/geopolitics",    "cat": "geo",       "url": "https://www.reddit.com/r/geopolitics/hot.json?limit=10", "type": "reddit"},
+    {"name": "r/CryptoCurrency", "cat": "crypto",    "url": "https://www.reddit.com/r/CryptoCurrency/hot.json?limit=10", "type": "reddit"},
+    {"name": "r/investing",      "cat": "economics", "url": "https://www.reddit.com/r/investing/hot.json?limit=10", "type": "reddit"},
+    {"name": "r/Polymarket",     "cat": "all",       "url": "https://www.reddit.com/r/Polymarket/hot.json?limit=10", "type": "reddit"},
 ]
 
 def log(msg):
@@ -119,10 +157,6 @@ def send_telegram(text):
 def news_id(title, source):
     return hashlib.md5(f"{source}:{title}".encode()).hexdigest()[:12]
 
-def is_high_value(title):
-    t = title.lower()
-    return any(k in t for k in HIGH_VALUE_KEYWORDS)
-
 def fetch_rss(src):
     try:
         r = requests.get(
@@ -131,14 +165,13 @@ def fetch_rss(src):
         )
         j = r.json()
         xml = ElementTree.fromstring(j["contents"])
-        items = xml.findall(".//item")
+        items = xml.findall(".//item") or xml.findall(".//{http://www.w3.org/2005/Atom}entry")
         news = []
         for i in items[:10]:
-            title = (i.findtext("title") or "").replace("<![CDATA[","").replace("]]>","").strip()
-            link = (i.findtext("link") or "").strip()
-            date = i.findtext("pubDate") or datetime.now(timezone.utc).isoformat()
+            title = (i.findtext("title") or i.findtext("{http://www.w3.org/2005/Atom}title") or "").replace("<![CDATA[","").replace("]]>","").strip()
+            link = (i.findtext("link") or i.findtext("{http://www.w3.org/2005/Atom}link") or "").strip()
             if title and len(title) > 10:
-                news.append({"title": title, "link": link, "date": date, "source": src["name"], "cat": src["cat"]})
+                news.append({"title": title, "link": link, "source": src["name"], "cat": src["cat"]})
         return news
     except:
         return []
@@ -152,11 +185,10 @@ def fetch_reddit(src):
             d = p.get("data", {})
             if d.get("stickied"): continue
             title = d.get("title", "")
-            if title and len(title) > 10:
+            if title and len(title) > 10 and d.get("ups", 0) > 100:
                 news.append({
                     "title": title,
                     "link": "https://reddit.com" + d.get("permalink",""),
-                    "date": datetime.now(timezone.utc).isoformat(),
                     "source": src["name"],
                     "cat": src["cat"],
                     "ups": d.get("ups", 0)
@@ -232,35 +264,43 @@ def match_news_to_markets(news_item, markets):
     stop = {"the","a","an","is","are","to","of","in","on","at","by","for","and","or","be","it","its","this","that","will","has","have","was","were","been","not","but","with","from","as","do","did","can","could","would","should","may","might","who","what","when","where","how","why","he","she","they","we"}
     title_words -= stop
     title_words = {w for w in title_words if len(w) > 3}
-
     matched = []
     for m in markets:
         mkt_words = set(m["title"].lower().replace(",","").replace(".","").split()) - stop
         common = title_words & mkt_words
         if len(common) >= 2:
             matched.append((m, len(common)))
-
     matched.sort(key=lambda x: x[1], reverse=True)
     return [m for m, _ in matched[:3]]
 
-def analyze_opportunity(news_item, markets):
-    if not ANTHROPIC_KEY or not markets:
-        return None
+# ─── ANALYSE IA AVEC SCORE ────────────────────────────────────────────────────
+
+def score_and_analyze(news_item, markets):
+    """Claude note l'info de 1-10 et analyse si >=7"""
+    if not ANTHROPIC_KEY:
+        return 5, None  # score neutre sans clé
+
     try:
-        markets_str = "\n".join([
-            f"- {m['title']} → prob actuelle {m['prob']}% (variation {'+' if m['delta']>0 else ''}{m['delta']}pts, vol {fmt_vol(m['vol'])})"
-            for m in markets
-        ])
+        markets_str = ""
+        if markets:
+            markets_str = "\n".join([
+                f"- {m['title']} → {m['prob']}% ({'+' if m['delta']>0 else ''}{m['delta']}pts, {fmt_vol(m['vol'])})"
+                for m in markets
+            ])
+
         prompt = (
-            f"Tu es un trader expert en marchés de prédiction Polymarket. Une info vient de sortir :\n\n"
-            f"SOURCE : {news_item['source']}\n"
-            f"INFO : {news_item['title']}\n\n"
-            f"MARCHÉS POLYMARKET LIÉS :\n{markets_str}\n\n"
-            f"Réponds en français, de façon ultra-concise et directe (3-4 phrases max) :\n"
-            f"1. Quel est l'impact probable de cette info sur ces marchés ?\n"
-            f"2. Quel marché est le plus intéressant et dans quel sens (OUI ou NON) ?\n"
-            f"3. Est-ce urgent d'agir ou peut-on attendre ?"
+            f"Tu es un trader expert en marchés de prédiction Polymarket.\n\n"
+            f"INFO SOURCE : {news_item['source']}\n"
+            f"TITRE : {news_item['title']}\n"
+            f"{'MARCHÉS LIÉS :\\n' + markets_str if markets_str else 'Aucun marché lié trouvé.'}\n\n"
+            f"TÂCHE : Évalue cette info en JSON strict (rien d'autre) :\n"
+            f'{{"score": <1-10>, "raison": "<pourquoi ce score en 1 phrase>", "action": "<OUI/NON/ATTENDRE>", "marche": "<titre du marché le plus pertinent ou vide>", "sens": "<OUI ou NON sur ce marché>", "analyse": "<explication en 2-3 phrases directes en français>"}}\n\n'
+            f"Score 1-4 = info sans impact sur Polymarket\n"
+            f"Score 5-6 = impact possible mais incertain\n"
+            f"Score 7-8 = impact probable, opportunité claire\n"
+            f"Score 9-10 = impact certain, agir immédiatement"
         )
+
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={
@@ -270,39 +310,54 @@ def analyze_opportunity(news_item, markets):
             },
             json={
                 "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 250,
+                "max_tokens": 300,
                 "messages": [{"role": "user", "content": prompt}]
             },
             timeout=20
         )
-        data = r.json()
-        if data.get("content"):
-            return data["content"][0]["text"].strip()
-        return None
+        text = r.json()["content"][0]["text"].strip()
+        # Nettoyer et parser le JSON
+        text = text.replace("```json","").replace("```","").strip()
+        data = json.loads(text)
+        score = int(data.get("score", 5))
+        analysis = None
+        if score >= MIN_SCORE:
+            action = data.get("action","")
+            sens = data.get("sens","")
+            marche = data.get("marche","")
+            analyse = data.get("analyse","")
+            raison = data.get("raison","")
+            analysis = f"{analyse}\n\n🎯 Action : <b>{action}</b> {f'({sens} sur {marche[:40]})' if marche else ''}"
+        return score, analysis
     except Exception as e:
-        log(f"Claude API error: {e}")
-        return None
+        log(f"Claude score error: {e}")
+        return 5, None
 
-def build_news_alert(news_item, matched_markets, analysis):
+def build_news_alert(news_item, matched_markets, score, analysis):
     cat_icons = {"geo": "🌍", "politics": "🏛️", "crypto": "₿", "economics": "📈", "all": "🔔"}
     icon = cat_icons.get(news_item["cat"], "📰")
-    msg = f"{icon} <b>INFO DÉTECTÉE — {news_item['source'].upper()}</b>\n\n"
+    score_bar = "🟢" if score >= 9 else "🟡" if score >= 7 else "🟠"
+
+    msg = f"{icon} <b>SIGNAL {score_bar} [{score}/10] — {news_item['source'].upper()}</b>\n\n"
     msg += f"📰 {news_item['title']}\n"
     if news_item.get("link"):
         msg += f"🔗 {news_item['link']}\n"
+
     if matched_markets:
-        msg += f"\n📊 <b>MARCHÉS POLYMARKET LIÉS</b>\n"
+        msg += f"\n📊 <b>MARCHÉS POLYMARKET</b>\n"
         for m in matched_markets:
             d = m["delta"]
             ds = f"+{d}" if d > 0 else str(d)
             msg += f"• {m['title'][:60]}\n  → {m['prob']}% · {ds}pts · {fmt_vol(m['vol'])}\n  {build_link(m)}\n"
+
     if analysis:
-        msg += f"\n🤖 <b>Analyse</b>\n{analysis}"
+        msg += f"\n🤖 <b>Analyse IA</b>\n{analysis}"
+
     return msg
 
-def run_news_check():
+def run_news_check(conn):
     global seen_news
-    log("Scan des sources d'information...")
+    log("Scan des sources...")
     news = fetch_all_news()
     new_items = []
 
@@ -311,32 +366,40 @@ def run_news_check():
         if nid in seen_news:
             continue
         seen_news.add(nid)
-        if is_high_value(item["title"]):
-            new_items.append(item)
+        new_items.append((nid, item))
 
     if not new_items:
-        log("Aucune nouvelle info à haute valeur")
+        log("Aucune nouvelle info")
         return
 
-    log(f"{len(new_items)} nouvelles infos à haute valeur détectées")
+    log(f"{len(new_items)} nouvelles infos — scoring IA en cours...")
+    sent = 0
 
-    # Limite à 3 alertes par cycle pour ne pas spammer
-    for item in new_items[:3]:
+    for nid, item in new_items[:10]:  # max 10 par cycle
         matched = match_news_to_markets(item, markets_cache)
-        analysis = analyze_opportunity(item, matched) if matched else None
-        msg = build_news_alert(item, matched, analysis)
-        if send_telegram(msg):
-            log(f"Alerte info envoyée : {item['title'][:60]}")
-        time.sleep(2)
+        score, analysis = score_and_analyze(item, matched)
+        log(f"Score {score}/10 : {item['title'][:50]}")
+
+        if score >= MIN_SCORE:
+            msg = build_news_alert(item, matched, score, analysis)
+            if send_telegram(msg):
+                save_alert(conn, nid, item["source"], item["title"], matched, score)
+                sent += 1
+                log(f"✅ Alerte envoyée (score {score}) : {item['title'][:50]}")
+            time.sleep(2)
+        else:
+            log(f"⏭️ Ignoré (score {score} < {MIN_SCORE})")
+
+    if sent == 0:
+        log(f"Aucune info n'a atteint le seuil de {MIN_SCORE}/10")
 
 def run_market_check():
-    global markets_cache, last_poly_check, seen_signals
+    global markets_cache, seen_signals
     log("Scan Polymarket...")
     markets = fetch_markets()
     if not markets:
         return
     markets_cache = markets
-    last_poly_check = time.time()
     log(f"{len(markets)} marchés chargés")
 
     signals = [
@@ -361,39 +424,60 @@ def run_market_check():
             seen_signals.add(m["id"] + "-sig")
             log(f"Signal marché : {m['title'][:50]} ({ds}pts)")
 
+def send_daily_report(conn):
+    count, avg_score, top_sources = get_daily_stats(conn)
+    if count == 0:
+        return
+    sources_str = "\n".join([f"• {s[0]} : {s[1]} alertes" for s in top_sources])
+    msg = (
+        f"📊 <b>RAPPORT QUOTIDIEN</b>\n\n"
+        f"Alertes envoyées (24h) : {count}\n"
+        f"Score moyen : {avg_score}/10\n\n"
+        f"<b>Top sources :</b>\n{sources_str}"
+    )
+    send_telegram(msg)
+    log("Rapport quotidien envoyé")
+
 def main():
-    log("=== Bot Polymarket Intelligence démarré ===")
+    log("=== Bot Polymarket Intelligence v3 démarré ===")
     if not TOKEN or not CHAT_ID:
         log("ERREUR : TOKEN ou CHAT_ID manquant")
         return
 
+    conn = init_db()
+
     send_telegram(
-        f"🟢 <b>Bot Polymarket Intelligence démarré</b>\n\n"
-        f"✅ Surveillance de {len(SOURCES)} sources actives\n"
-        f"✅ Scan news toutes les {INTERVAL} min\n"
-        f"✅ Scan Polymarket toutes les {POLY_INTERVAL} min\n"
-        f"✅ Analyse IA : {'activée' if ANTHROPIC_KEY else 'désactivée'}\n\n"
-        f"Tu recevras une alerte dès qu'une info exploitable est détectée."
+        f"🟢 <b>Bot Polymarket Intelligence v3</b>\n\n"
+        f"✅ {len(SOURCES)} sources surveillées\n"
+        f"✅ Scan toutes les {INTERVAL} min\n"
+        f"✅ Score IA minimum : {MIN_SCORE}/10\n"
+        f"✅ Historique : activé\n"
+        f"✅ Rapport quotidien : activé\n\n"
+        f"Seules les infos scoring ≥{MIN_SCORE}/10 te seront envoyées."
     )
 
-    # Charger les marchés au démarrage
     log("Chargement initial des marchés...")
     markets_cache.extend(fetch_markets())
     log(f"{len(markets_cache)} marchés chargés")
 
     cycle = 0
+    last_report = datetime.now(timezone.utc)
+
     while True:
         cycle += 1
-        # Scan des news à chaque cycle
-        run_news_check()
+        run_news_check(conn)
 
-        # Scan Polymarket tous les N cycles
         if cycle % max(1, POLY_INTERVAL // INTERVAL) == 0:
             run_market_check()
+
+        # Rapport quotidien
+        now = datetime.now(timezone.utc)
+        if (now - last_report).total_seconds() >= 86400:
+            send_daily_report(conn)
+            last_report = now
 
         log(f"Prochain scan dans {INTERVAL} min...")
         time.sleep(INTERVAL * 60)
 
 if __name__ == "__main__":
     main()
-# Ce bloc est juste un test — on vérifie que le fichier existe
