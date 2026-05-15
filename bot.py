@@ -88,11 +88,20 @@ def fetch_markets():
         log(f"Fetch markets error: {e}")
         return []
 
+def build_link(m):
+    # Utilise le slug si disponible et valide, sinon lien de recherche
+    slug = m.get("slug","")
+    if slug and not slug.isdigit() and len(slug) > 5:
+        return f"https://polymarket.com/event/{slug}"
+    # Fallback : recherche par titre sur Polymarket
+    query = m["title"][:50].replace(" ","+")
+    return f"https://polymarket.com/markets?_q={query}"
+
 def build_signal_msg(m):
     icon = "🚨" if abs(m["delta"]) >= 20 else "⚠️"
     direction = "+" if m["delta"] > 0 else ""
     side = "OUI" if m["prob"] >= 50 else "NON"
-    link = f"https://polymarket.com/event/{m['slug']}"
+    link = build_link(m)
     return (
         f"{icon} <b>SIGNAL POLYMARKET</b>\n\n"
         f"📊 {m['title']}\n"
