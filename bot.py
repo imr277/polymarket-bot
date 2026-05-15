@@ -1,7 +1,6 @@
 import os
 import time
 import json
-import math
 import requests
 from datetime import datetime
 
@@ -56,6 +55,17 @@ def send_telegram(text):
         log(f"Telegram exception: {e}")
         return False
 
+def build_link(m):
+    # Priorité : event_slug > slug > recherche
+    event_slug = m.get("event_slug", "")
+    slug = m.get("slug", "")
+    if event_slug and not event_slug.isdigit() and len(event_slug) > 5:
+        return f"https://polymarket.com/event/{event_slug}"
+    if slug and not slug.isdigit() and len(slug) > 5:
+        return f"https://polymarket.com/event/{slug}"
+    query = m["title"][:60].replace(" ", "%20")
+    return f"https://polymarket.com/search?q={query}"
+
 def fetch_markets():
     try:
         r = requests.get(POLYMARKET_URL, timeout=15)
@@ -72,30 +82,27 @@ def fetch_markets():
             vol = float(m.get("volume24hr") or m.get("volumeNum") or m.get("volume") or 0)
             delta = round((prices[0] - 0.5) * 200) if len(prices) >= 2 else 0
             title = m.get("question") or m.get("title") or ""
+
+            # Récupérer le slug de l'événement parent
+            events = m.get("events") or []
+            event_slug = events[0].get("slug", "") if events else m.get("eventSlug", "")
+
             if vol > 0 and len(title) > 5:
                 result.append({
-                    "id": m.get("id",""),
+                    "id": m.get("id", ""),
                     "title": title,
                     "prob": prob,
                     "vol": vol,
                     "delta": delta,
                     "cat": guess_cat(title),
-                    "slug": m.get("slug") or m.get("id",""),
-                    "endDate": m.get("endDateIso") or m.get("endDate","")
+                    "slug": m.get("slug") or "",
+                    "event_slug": event_slug,
+                    "endDate": m.get("endDateIso") or m.get("endDate", "")
                 })
         return result
     except Exception as e:
         log(f"Fetch markets error: {e}")
         return []
-
-def build_link(m):
-    # Utilise le slug si disponible et valide, sinon lien de recherche
-    slug = m.get("slug","")
-    if slug and not slug.isdigit() and len(slug) > 5:
-        return f"https://polymarket.com/event/{slug}"
-    # Fallback : recherche par titre sur Polymarket
-    query = m["title"][:50].replace(" ","+")
-    return f"https://polymarket.com/markets?_q={query}"
 
 def build_signal_msg(m):
     icon = "🚨" if abs(m["delta"]) >= 20 else "⚠️"
@@ -119,9 +126,10 @@ def build_digest_msg(markets):
     for i, m in enumerate(top, 1):
         d = m["delta"]
         ds = f"+{d}" if d > 0 else str(d)
-        lines.append(f"{i}. {m['title'][:55]}\n   {m['prob']}% · {fmt_vol(m['vol'])} · {ds}pts")
+        link = build_link(m)
+        lines.append(f"{i}. {m['title'][:55]}\n   {m['prob']}% · {fmt_vol(m['vol'])} · {ds}pts\n   🔗 {link}")
     body = "\n\n".join(lines)
-    return f"📋 <b>RÉSUMÉ POLYMARKET</b>\n\nTop 3 marchés par volume :\n\n{body}\n\n🔗 https://polymarket.com"
+    return f"📋 <b>RÉSUMÉ POLYMARKET</b>\n\nTop 3 marchés par volume :\n\n{body}"
 
 def run_check():
     global markets_cache
@@ -133,15 +141,24 @@ def run_check():
     markets_cache = markets
     log(f"{len(markets)} marchés chargés")
     sent = 0
-    # Exclure les marchés résolus (prob 0% ou 100%) et variations extrêmes (-100/+100)
-    signals = [m for m in markets if abs(m["delta"]) >= THRESHOLD and abs(m["delta"]) < 95 and 1 < m["prob"] < 99 and m["id"]+"-sig" not in alerted]
+
+    # Exclure marchés résolus (prob 0% ou 100%) et variations extrêmes
+    signals = [
+        m for m in markets
+        if abs(m["delta"]) >= THRESHOLD
+        and abs(m["delta"]) < 95
+        and 1 < m["prob"] < 99
+        and m["id"] + "-sig" not in alerted
+    ]
     signals = sorted(signals, key=lambda m: abs(m["delta"]), reverse=True)[:3]
+
     for m in signals:
         msg = build_signal_msg(m)
         if send_telegram(msg):
-            alerted.add(m["id"]+"-sig")
+            alerted.add(m["id"] + "-sig")
             sent += 1
             log(f"Alerte envoyée : {m['title'][:50]} ({'+' if m['delta']>0 else ''}{m['delta']}pts)")
+
     if sent == 0:
         log(f"Aucun signal au-dessus de {THRESHOLD}pts")
     return markets
@@ -166,7 +183,6 @@ def main():
         markets = run_check()
         check_count += 1
 
-        # Résumé toutes les 12 vérifications (1h si interval=5min)
         if check_count % 12 == 0 and markets:
             send_telegram(build_digest_msg(markets))
             log("Résumé horaire envoyé")
