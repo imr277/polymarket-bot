@@ -294,16 +294,33 @@ def fetch_url_content(url, max_chars=1500):
     except:
         return ""
 
+def fetch_article_content(url, max_chars=1500):
+    """Récupère le contenu brut d'un article"""
+    if not url:
+        return ""
+    try:
+        r = requests.get(
+            f"https://api.allorigins.win/get?url={requests.utils.quote(url)}",
+            timeout=8
+        )
+        html = r.json().get("contents", "")
+        import re as re2
+        text = re2.sub(r'<[^>]+>', ' ', html)
+        text = re2.sub(r'\s+', ' ', text).strip()
+        return text[:max_chars]
+    except:
+        return ""
+
 def score_and_analyze(news_item, markets):
-    """Claude lit le contenu, note et analyse"""
+    """Claude lit le contenu, note 1-10 et donne action + lien Polymarket"""
     if not ANTHROPIC_KEY:
         return 5, None, None
     try:
-        # Lire le contenu du lien
-        url_content = ""
+        # Lire le contenu de l'article
+        article = ""
         if news_item.get("link"):
             log(f"Lecture : {news_item['link'][:60]}")
-            url_content = fetch_url_content(news_item["link"])
+            article = fetch_article_content(news_item["link"])
 
         markets_str = ""
         if markets:
@@ -312,22 +329,20 @@ def score_and_analyze(news_item, markets):
                 for i, m in enumerate(markets)
             ])
 
-        content_section = f"CONTENU :\n{url_content[:800]}\n\n" if url_content else ""
-
         prompt = (
             f"Tu es un trader expert Polymarket.\n\n"
             f"SOURCE : {news_item['source']}\n"
-            f"TITRE : {news_item['title']}\n\n"
-            f"{content_section}"
-            f"MARCHÉS LIÉS :\n{markets_str if markets_str else 'Aucun.'}\n\n"
-            f'Réponds en JSON strict : {{"score": <1-10>, "action": "<ACHETER OUI/ACHETER NON/ATTENDRE/AUCUNE OPPORTUNITÉ>", "marche_index": <0-2 ou -1>, "analyse": "<2-3 phrases directes en français>"}}\n\n'
-            f"7+ = opportunité, 9+ = urgent"
+            f"TITRE : {news_item['title']}\n"
+            f"{'CONTENU : ' + article[:1000] if article else '(contenu non disponible)'}\n\n"
+            f"MARCHÉS POLYMARKET LIÉS :\n{markets_str if markets_str else 'Aucun.'}\n\n"
+            f'Réponds UNIQUEMENT en JSON : {{"score": <1-10>, "action": "<ACHETER OUI/ACHETER NON/ATTENDRE/AUCUNE OPPORTUNITE>", "marche_index": <0-2 ou -1 si aucun>, "analyse": "<2-3 phrases directes en français expliquant l'impact et pourquoi agir ou pas>"}}\n\n'
+            f"Score: 1-4=aucun impact, 5-6=incertain, 7-8=opportunité, 9-10=urgent"
         )
 
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
-            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 300, "messages": [{"role": "user", "content": prompt}]},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 350, "messages": [{"role": "user", "content": prompt}]},
             timeout=25
         )
         text = r.json()["content"][0]["text"].strip().replace("```json","").replace("```","").strip()
@@ -337,11 +352,23 @@ def score_and_analyze(news_item, markets):
         best_market = None
 
         if score >= MIN_SCORE:
-            action = data.get("action", "")
+            action = data.get("action", "ATTENDRE")
             analyse = data.get("analyse", "")
-            idx = int(data.get("marche_index", -1))
-            best_market = markets[idx] if 0 <= idx < len(markets) else (markets[0] if markets else None)
-            analysis = f"{analyse}\n\n🎯 <b>{action}</b>"
+            midx = int(data.get("marche_index", -1))
+            best_market = markets[midx] if 0 <= midx < len(markets) else (markets[0] if markets else None)
+
+            action_icons = {
+                "ACHETER OUI": "🟢 ACHETER OUI",
+                "ACHETER NON": "🔴 ACHETER NON",
+                "ATTENDRE": "⏳ ATTENDRE",
+                "AUCUNE OPPORTUNITE": "⚪ AUCUNE OPPORTUNITÉ"
+            }
+            action_label = action_icons.get(action, f"🎯 {action}")
+
+            analysis = f"{analyse}\n\n{action_label}"
+            if best_market:
+                analysis += f"\nMarché : {best_market['title'][:60]}"
+                analysis += f"\n🔗 {build_link(best_market)}"
 
         return score, analysis, best_market
     except Exception as e:
