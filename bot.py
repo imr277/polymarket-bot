@@ -277,65 +277,79 @@ def match_news_to_markets(news_item, markets):
 
 # ─── ANALYSE IA AVEC SCORE ────────────────────────────────────────────────────
 
-def score_and_analyze(news_item, markets):
-    """Claude note l'info de 1-10 et analyse si >=7"""
-    if not ANTHROPIC_KEY:
-        return 5, None  # score neutre sans clé
 
+def fetch_url_content(url, max_chars=1500):
+    """Lit le contenu d'une page pour analyse"""
+    if not url:
+        return ""
     try:
+        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        # Extraire le texte brut
+        text = r.text
+        # Supprimer les balises HTML basiquement
+        import re
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text[:max_chars]
+    except:
+        return ""
+
+def score_and_analyze(news_item, markets):
+    """Claude lit le contenu, note et analyse"""
+    if not ANTHROPIC_KEY:
+        return 5, None, None
+    try:
+        # Lire le contenu du lien
+        url_content = ""
+        if news_item.get("link"):
+            log(f"Lecture : {news_item['link'][:60]}")
+            url_content = fetch_url_content(news_item["link"])
+
         markets_str = ""
         if markets:
             markets_str = "\n".join([
-                f"- {m['title']} → {m['prob']}% ({'+' if m['delta']>0 else ''}{m['delta']}pts, {fmt_vol(m['vol'])})"
-                for m in markets
+                f"{i}. {m['title']} → {m['prob']}% ({'+' if m['delta']>0 else ''}{m['delta']}pts, {fmt_vol(m['vol'])})"
+                for i, m in enumerate(markets)
             ])
 
+        content_section = f"CONTENU :\n{url_content[:800]}\n\n" if url_content else ""
+
         prompt = (
-            f"Tu es un trader expert en marchés de prédiction Polymarket.\n\n"
-            f"INFO SOURCE : {news_item['source']}\n"
-            f"TITRE : {news_item['title']}\n"
-            f"{'MARCHÉS LIÉS :\\n' + markets_str if markets_str else 'Aucun marché lié trouvé.'}\n\n"
-            f"TÂCHE : Évalue cette info en JSON strict (rien d'autre) :\n"
-            f'{{"score": <1-10>, "raison": "<pourquoi ce score en 1 phrase>", "action": "<OUI/NON/ATTENDRE>", "marche": "<titre du marché le plus pertinent ou vide>", "sens": "<OUI ou NON sur ce marché>", "analyse": "<explication en 2-3 phrases directes en français>"}}\n\n'
-            f"Score 1-4 = info sans impact sur Polymarket\n"
-            f"Score 5-6 = impact possible mais incertain\n"
-            f"Score 7-8 = impact probable, opportunité claire\n"
-            f"Score 9-10 = impact certain, agir immédiatement"
+            f"Tu es un trader expert Polymarket.\n\n"
+            f"SOURCE : {news_item['source']}\n"
+            f"TITRE : {news_item['title']}\n\n"
+            f"{content_section}"
+            f"MARCHÉS LIÉS :\n{markets_str if markets_str else 'Aucun.'}\n\n"
+            f'Réponds en JSON strict : {{"score": <1-10>, "action": "<ACHETER OUI/ACHETER NON/ATTENDRE/AUCUNE OPPORTUNITÉ>", "marche_index": <0-2 ou -1>, "analyse": "<2-3 phrases directes en français>"}}\n\n'
+            f"7+ = opportunité, 9+ = urgent"
         )
 
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 300,
-                "messages": [{"role": "user", "content": prompt}]
-            },
-            timeout=20
+            headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 300, "messages": [{"role": "user", "content": prompt}]},
+            timeout=25
         )
-        text = r.json()["content"][0]["text"].strip()
-        # Nettoyer et parser le JSON
-        text = text.replace("```json","").replace("```","").strip()
+        text = r.json()["content"][0]["text"].strip().replace("```json","").replace("```","").strip()
         data = json.loads(text)
         score = int(data.get("score", 5))
         analysis = None
-        if score >= MIN_SCORE:
-            action = data.get("action","")
-            sens = data.get("sens","")
-            marche = data.get("marche","")
-            analyse = data.get("analyse","")
-            raison = data.get("raison","")
-            analysis = f"{analyse}\n\n🎯 Action : <b>{action}</b> {f'({sens} sur {marche[:40]})' if marche else ''}"
-        return score, analysis
-    except Exception as e:
-        log(f"Claude score error: {e}")
-        return 5, None
+        best_market = None
 
-def build_news_alert(news_item, matched_markets, score, analysis):
+        if score >= MIN_SCORE:
+            action = data.get("action", "")
+            analyse = data.get("analyse", "")
+            idx = int(data.get("marche_index", -1))
+            best_market = markets[idx] if 0 <= idx < len(markets) else (markets[0] if markets else None)
+            analysis = f"{analyse}\n\n🎯 <b>{action}</b>"
+
+        return score, analysis, best_market
+    except Exception as e:
+        log(f"Claude error: {e}")
+        return 5, None, None
+
+
+def build_news_alert(news_item, matched_markets, score, analysis, best_market=None):
     cat_icons = {"geo": "🌍", "politics": "🏛️", "crypto": "₿", "economics": "📈", "all": "🔔"}
     icon = cat_icons.get(news_item["cat"], "📰")
     score_bar = "🟢" if score >= 9 else "🟡" if score >= 7 else "🟠"
@@ -354,6 +368,9 @@ def build_news_alert(news_item, matched_markets, score, analysis):
 
     if analysis:
         msg += f"\n🤖 <b>Analyse IA</b>\n{analysis}"
+
+    if best_market:
+        msg += f"\n\n📌 <b>Marché recommandé :</b>\n{best_market['title'][:60]}\n→ {best_market['prob']}% actuel\n{build_link(best_market)}"
 
     return msg
 
@@ -432,11 +449,11 @@ def run_news_check(conn):
 
     for nid, item in new_items[:10]:  # max 10 par cycle
         matched = match_news_to_markets(item, markets_cache)
-        score, analysis = score_and_analyze(item, matched)
+        score, analysis, best_market = score_and_analyze(item, matched)
         log(f"Score {score}/10 : {item['title'][:50]}")
 
         if score >= MIN_SCORE:
-            msg = build_news_alert(item, matched, score, analysis)
+            msg = build_news_alert(item, matched, score, analysis, best_market)
             if send_telegram(msg):
                 save_alert(conn, nid, item["source"], item["title"], matched, score)
                 sent += 1
