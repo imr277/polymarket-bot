@@ -133,7 +133,8 @@ def run_check():
     markets_cache = markets
     log(f"{len(markets)} marchés chargés")
     sent = 0
-    signals = [m for m in markets if abs(m["delta"]) >= THRESHOLD and m["id"]+"-sig" not in alerted]
+    # Exclure les marchés résolus (prob 0% ou 100%) et variations extrêmes (-100/+100)
+    signals = [m for m in markets if abs(m["delta"]) >= THRESHOLD and abs(m["delta"]) < 95 and 1 < m["prob"] < 99 and m["id"]+"-sig" not in alerted]
     signals = sorted(signals, key=lambda m: abs(m["delta"]), reverse=True)[:3]
     for m in signals:
         msg = build_signal_msg(m)
