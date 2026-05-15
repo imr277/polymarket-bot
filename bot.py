@@ -6,6 +6,7 @@ import requests
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from xml.etree import ElementTree
+from calendar_events import CALENDAR
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
@@ -355,6 +356,59 @@ def build_news_alert(news_item, matched_markets, score, analysis):
 
     return msg
 
+
+# ─── CALENDRIER ÉCONOMIQUE ────────────────────────────────────────────────────
+
+def check_calendar(conn, markets):
+    """Envoie une alerte 60min et 15min avant chaque événement majeur"""
+    now = datetime.now(timezone.utc)
+    sent = 0
+    for event in CALENDAR:
+        try:
+            event_dt = datetime.fromisoformat(f"{event['date']}T{event['time']}").replace(tzinfo=timezone.utc)
+            diff_min = (event_dt - now).total_seconds() / 60
+
+            # Alerte 60 min avant
+            alert_id_60 = f"cal-60-{event['date']}-{event['name'][:20]}"
+            if 58 <= diff_min <= 62 and alert_id_60 not in seen_signals:
+                matched = [m for m in markets if any(k in m["title"].lower() for k in event["keywords"])]
+                msg = build_calendar_alert(event, matched, diff_min=60)
+                if send_telegram(msg):
+                    seen_signals.add(alert_id_60)
+                    sent += 1
+                    log(f"Calendrier 60min : {event['name']}")
+
+            # Alerte 15 min avant
+            alert_id_15 = f"cal-15-{event['date']}-{event['name'][:20]}"
+            if 13 <= diff_min <= 17 and alert_id_15 not in seen_signals:
+                matched = [m for m in markets if any(k in m["title"].lower() for k in event["keywords"])]
+                msg = build_calendar_alert(event, matched, diff_min=15)
+                if send_telegram(msg):
+                    seen_signals.add(alert_id_15)
+                    sent += 1
+                    log(f"Calendrier 15min : {event['name']}")
+
+        except Exception as e:
+            log(f"Calendar error: {e}")
+    return sent
+
+def build_calendar_alert(event, matched_markets, diff_min):
+    impact_icon = "🔴" if event["impact"] >= 10 else "🟠" if event["impact"] >= 8 else "🟡"
+    urgency = "DANS 15 MINUTES" if diff_min <= 15 else "DANS 1 HEURE"
+    msg = (
+        f"{impact_icon} <b>CALENDRIER ÉCONOMIQUE — {urgency}</b>\n\n"
+        f"📅 {event['name']}\n"
+        f"🕐 Impact : {event['impact']}/10\n"
+    )
+    if matched_markets:
+        msg += f"\n📊 <b>MARCHÉS POLYMARKET LIÉS</b>\n"
+        for m in matched_markets[:3]:
+            d = m["delta"]
+            ds = f"+{d}" if d > 0 else str(d)
+            msg += f"• {m['title'][:60]}\n  → {m['prob']}% · {ds}pts · {fmt_vol(m['vol'])}\n  {build_link(m)}\n"
+    msg += f"\n💡 <b>Prépare-toi — ce chiffre va faire bouger Polymarket.</b>"
+    return msg
+
 def run_news_check(conn):
     global seen_news
     log("Scan des sources...")
@@ -466,6 +520,7 @@ def main():
     while True:
         cycle += 1
         run_news_check(conn)
+        check_calendar(conn, markets_cache)
 
         if cycle % max(1, POLY_INTERVAL // INTERVAL) == 0:
             run_market_check()
