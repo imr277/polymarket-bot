@@ -6,6 +6,7 @@ from datetime import datetime
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 THRESHOLD = int(os.environ.get("THRESHOLD", "10"))
 INTERVAL = int(os.environ.get("INTERVAL_MINUTES", "5"))
 
@@ -56,7 +57,6 @@ def send_telegram(text):
         return False
 
 def build_link(m):
-    # Priorité : event_slug > slug > recherche
     event_slug = m.get("event_slug", "")
     slug = m.get("slug", "")
     if event_slug and not event_slug.isdigit() and len(event_slug) > 5:
@@ -65,6 +65,45 @@ def build_link(m):
         return f"https://polymarket.com/event/{slug}"
     query = m["title"][:60].replace(" ", "%20")
     return f"https://polymarket.com/search?q={query}"
+
+def analyze_with_claude(m):
+    if not ANTHROPIC_KEY:
+        return None
+    try:
+        direction = "+" if m["delta"] > 0 else ""
+        prompt = (
+            f"Tu es un expert en marchés de prédiction. Analyse ce signal Polymarket en 3-4 phrases courtes et directes :\n\n"
+            f"Marché : {m['title']}\n"
+            f"Probabilité actuelle : {m['prob']}%\n"
+            f"Variation 24h : {direction}{m['delta']} points\n"
+            f"Volume 24h : {fmt_vol(m['vol'])}\n"
+            f"Catégorie : {m['cat']}\n\n"
+            f"Réponds en français. Structure ta réponse en 3 parties :\n"
+            f"1. Ce que ce signal signifie concrètement\n"
+            f"2. Ce qui pourrait expliquer ce mouvement\n"
+            f"3. Si c'est une opportunité ou un risque (sois direct)"
+        )
+        r = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 300,
+                "messages": [{"role": "user", "content": prompt}]
+            },
+            timeout=20
+        )
+        data = r.json()
+        if data.get("content"):
+            return data["content"][0]["text"].strip()
+        return None
+    except Exception as e:
+        log(f"Claude API error: {e}")
+        return None
 
 def fetch_markets():
     try:
@@ -82,11 +121,8 @@ def fetch_markets():
             vol = float(m.get("volume24hr") or m.get("volumeNum") or m.get("volume") or 0)
             delta = round((prices[0] - 0.5) * 200) if len(prices) >= 2 else 0
             title = m.get("question") or m.get("title") or ""
-
-            # Récupérer le slug de l'événement parent
             events = m.get("events") or []
             event_slug = events[0].get("slug", "") if events else m.get("eventSlug", "")
-
             if vol > 0 and len(title) > 5:
                 result.append({
                     "id": m.get("id", ""),
@@ -104,21 +140,23 @@ def fetch_markets():
         log(f"Fetch markets error: {e}")
         return []
 
-def build_signal_msg(m):
+def build_signal_msg(m, analysis=None):
     icon = "🚨" if abs(m["delta"]) >= 20 else "⚠️"
     direction = "+" if m["delta"] > 0 else ""
     side = "OUI" if m["prob"] >= 50 else "NON"
     link = build_link(m)
-    return (
+    msg = (
         f"{icon} <b>SIGNAL POLYMARKET</b>\n\n"
         f"📊 {m['title']}\n"
         f"Probabilité : {m['prob']}% ({side})\n"
         f"Variation : {direction}{m['delta']}pts / 24h\n"
         f"Volume 24h : {fmt_vol(m['vol'])}\n"
-        f"Catégorie : {m['cat']}\n\n"
-        f"💡 Mouvement fort détecté — vérifiez les news liées.\n\n"
-        f"🔗 {link}"
+        f"Catégorie : {m['cat']}\n"
     )
+    if analysis:
+        msg += f"\n🤖 <b>Analyse IA</b>\n{analysis}\n"
+    msg += f"\n🔗 {link}"
+    return msg
 
 def build_digest_msg(markets):
     top = sorted(markets, key=lambda m: m["vol"], reverse=True)[:3]
@@ -142,7 +180,6 @@ def run_check():
     log(f"{len(markets)} marchés chargés")
     sent = 0
 
-    # Exclure marchés résolus (prob 0% ou 100%) et variations extrêmes
     signals = [
         m for m in markets
         if abs(m["delta"]) >= THRESHOLD
@@ -153,7 +190,11 @@ def run_check():
     signals = sorted(signals, key=lambda m: abs(m["delta"]), reverse=True)[:3]
 
     for m in signals:
-        msg = build_signal_msg(m)
+        log(f"Signal détecté : {m['title'][:50]} — analyse IA en cours...")
+        analysis = analyze_with_claude(m)
+        if analysis:
+            log("Analyse IA générée avec succès")
+        msg = build_signal_msg(m, analysis)
         if send_telegram(msg):
             alerted.add(m["id"] + "-sig")
             sent += 1
@@ -164,18 +205,20 @@ def run_check():
     return markets
 
 def main():
-    log("=== Bot Polymarket démarré ===")
+    log("=== Bot Polymarket + IA démarré ===")
     log(f"Seuil : {THRESHOLD}pts | Intervalle : {INTERVAL} min")
+    log(f"Analyse IA : {'activée' if ANTHROPIC_KEY else 'désactivée (clé manquante)'}")
 
     if not TOKEN or not CHAT_ID:
         log("ERREUR : TELEGRAM_TOKEN ou CHAT_ID manquant")
         return
 
     send_telegram(
-        f"🟢 <b>Bot Polymarket démarré</b>\n\n"
+        f"🟢 <b>Bot Polymarket + IA démarré</b>\n\n"
         f"Surveillance active 🎯\n"
         f"Seuil : {THRESHOLD}pts\n"
-        f"Scan : toutes les {INTERVAL} min"
+        f"Scan : toutes les {INTERVAL} min\n"
+        f"Analyse IA : {'✅ activée' if ANTHROPIC_KEY else '❌ désactivée'}"
     )
 
     check_count = 0
