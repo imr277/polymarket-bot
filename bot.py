@@ -335,7 +335,7 @@ def score_and_analyze(news_item, markets):
             f"TITRE : {news_item['title']}\n"
             f"{'CONTENU : ' + article[:1000] if article else '(contenu non disponible)'}\n\n"
             f"MARCHÉS POLYMARKET LIÉS :\n{markets_str if markets_str else 'Aucun.'}\n\n"
-            f'Réponds UNIQUEMENT en JSON : {{"score": <1-10>, "action": "<ACHETER OUI/ACHETER NON/ATTENDRE/AUCUNE OPPORTUNITE>", "marche_index": <0-2 ou -1 si aucun>, "analyse": "<2-3 phrases directes en français expliquant l'impact et pourquoi agir ou pas>"}}\n\n'
+            f'Réponds UNIQUEMENT en JSON : {{"score": <1-10>, "action": "<ACHETER OUI/ACHETER NON/ATTENDRE/AUCUNE OPPORTUNITE>", "marche_index": <0-2 ou -1 si aucun>, "analyse": "<2-3 phrases directes en francais expliquant impact et pourquoi agir ou pas>"}}\n\n'
             f"Score: 1-4=aucun impact, 5-6=incertain, 7-8=opportunité, 9-10=urgent"
         )
 
