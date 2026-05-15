@@ -244,6 +244,7 @@ def fetch_markets():
                     "cat": guess_cat(title),
                     "slug": m.get("slug") or "",
                     "event_slug": event_slug,
+                    "endDate": m.get("endDateIso") or m.get("endDate", ""),
                 })
         return result
     except Exception as e:
@@ -447,6 +448,19 @@ def run_news_check(conn):
     if sent == 0:
         log(f"Aucune info n'a atteint le seuil de {MIN_SCORE}/10")
 
+
+def is_expiring_soon(m, max_days=30):
+    """Retourne True si le marché expire dans les 30 prochains jours"""
+    end = m.get("endDate", "")
+    if not end:
+        return False
+    try:
+        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        days_left = (end_dt - datetime.now(timezone.utc)).days
+        return 0 < days_left <= max_days
+    except:
+        return False
+
 def run_market_check():
     global markets_cache, seen_signals
     log("Scan Polymarket...")
@@ -458,8 +472,11 @@ def run_market_check():
 
     signals = [
         m for m in markets
-        if abs(m["delta"]) >= 15
-        and abs(m["delta"]) < 95
+        if abs(m["delta"]) >= 10
+        and abs(m["delta"]) < 40
+        and m["vol"] >= 10000
+        and 30 < m["prob"] < 70
+        and is_expiring_soon(m)
         and m["id"] + "-sig" not in seen_signals
     ]
     signals = sorted(signals, key=lambda m: abs(m["delta"]), reverse=True)[:2]
