@@ -681,8 +681,11 @@ def main():
     send_telegram(
         f"🟢 <b>Bot Polymarket Intelligence v3</b>\n\n"
         f"✅ {len(SOURCES)} sources surveillées\n"
+        f"✅ 200 marchés Polymarket surveillés\n"
+        f"✅ Surges détectés en temps réel\n"
         f"✅ Scan toutes les {INTERVAL} min\n"
         f"✅ Score IA minimum : {MIN_SCORE}/10\n"
+        f"✅ Expiration : marchés < 30 jours\n"
         f"✅ Historique : activé\n"
         f"✅ Rapport quotidien : activé\n\n"
         f"Seules les infos scoring ≥{MIN_SCORE}/10 te seront envoyées."
