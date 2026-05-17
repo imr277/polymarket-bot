@@ -16,7 +16,7 @@ POLY_INTERVAL = int(os.environ.get("POLY_INTERVAL_MINUTES", "5"))
 MIN_SCORE = int(os.environ.get("MIN_SCORE", "7"))
 
 TG_URL = f"https://api.telegram.org/bot{TOKEN}"
-POLYMARKET_URL = "https://gamma-api.polymarket.com/markets?limit=50&active=true&closed=false&order=volume&ascending=false"
+POLYMARKET_URL = "https://gamma-api.polymarket.com/markets?limit=200&active=true&closed=false&order=volume&ascending=false"
 
 seen_news = set()
 seen_signals = set()
@@ -496,8 +496,8 @@ def detect_prob_surges(markets):
         prob_change_1h = current_prob - old_prob
         vol_change = ((current_vol - old_vol) / old_vol * 100) if old_vol > 0 else 0
 
-        # Signal fort : prob monte de +8pts en 1h ET volume augmente de +50%
-        if abs(prob_change_1h) >= 8 and vol_change >= 50 and 20 < current_prob < 80:
+        # Signal fort : prob monte de +5pts en 1h ET volume augmente de +30%
+        if abs(prob_change_1h) >= 5 and vol_change >= 30 and 15 < current_prob < 85:
             surge_id = f"{mid}-surge"
             if surge_id not in seen_signals:
                 surges.append({
@@ -588,32 +588,73 @@ def run_market_check():
     if not markets:
         return
     markets_cache = markets
-    log(f"{len(markets)} marchés chargés")
+    log(f"{len(markets)} marches charges")
 
-    signals = [
+    # Mettre a jour l historique des probabilites
+    update_prob_history(markets)
+
+    # 1. SURGES — prob + volume qui montent ensemble en 1h
+    surges = detect_prob_surges(markets)
+    for surge in surges[:3]:
+        m = surge["market"]
+        msg = build_surge_alert(surge)
+        if send_telegram(msg):
+            seen_signals.add(m["id"] + "-surge")
+            log(f"Surge : {m['title'][:50]}")
+        time.sleep(2)
+
+    # 2. MARCHES QUI FLUCTUENT — criteres equilibres
+    movers = [
         m for m in markets
-        if abs(m["delta"]) >= 10
-        and abs(m["delta"]) < 40
-        and m["vol"] >= 10000
-        and 30 < m["prob"] < 70
-        and is_expiring_soon(m)
+        if abs(m["delta"]) >= 8          # Mouvement significatif
+        and abs(m["delta"]) < 45         # Pas un marche resolu
+        and m["vol"] >= 5000             # Marche liquide
+        and 30 < m["prob"] < 70          # Encore incertain et exploitable
+        and is_expiring_soon(m)          # Evenement dans 60 jours max
         and m["id"] + "-sig" not in seen_signals
     ]
-    signals = sorted(signals, key=lambda m: abs(m["delta"]), reverse=True)[:2]
+    movers = sorted(movers, key=lambda m: (abs(m["delta"]) * m["vol"]), reverse=True)[:4]
 
-    for m in signals:
+    for m in movers:
         d = m["delta"]
         ds = f"+{d}" if d > 0 else str(d)
+        direction = "OUI" if d > 0 else "NON"
+        icon = "📈" if d > 0 else "📉"
+
+        # Analyse IA si mouvement fort
+        analyse = ""
+        if abs(d) >= 15 and ANTHROPIC_KEY:
+            try:
+                prompt = (
+                    f"Marche Polymarket : {m['title']}\n"
+                    f"Prob : {m['prob']}% ({ds}pts en 24h), Vol : {fmt_vol(m['vol'])}\n"
+                    f"En 1 phrase : pourquoi ce marche bouge et est-ce une opportunite ?"
+                )
+                r = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                    json={"model": "claude-haiku-4-5-20251001", "max_tokens": 100, "messages": [{"role": "user", "content": prompt}]},
+                    timeout=15
+                )
+                analyse = r.json()["content"][0]["text"].strip()
+            except:
+                pass
+
         msg = (
-            f"⚡ <b>MOUVEMENT POLYMARKET</b>\n\n"
-            f"📊 {m['title']}\n"
-            f"Probabilité : {m['prob']}% ({ds}pts / 24h)\n"
-            f"Volume 24h : {fmt_vol(m['vol'])}\n"
-            f"🔗 {build_link(m)}"
+            f"{icon} <b>MARCHE EN MOUVEMENT</b>\n\n"
+            f"📊 {m['title']}\n\n"
+            f"Prob : <b>{m['prob']}%</b> ({ds}pts / 24h)\n"
+            f"Vol 24h : {fmt_vol(m['vol'])}\n"
+            f"Signal : <b>{direction}</b>\n"
         )
+        if analyse:
+            msg += f"\n💡 {analyse}\n"
+        msg += f"\n🔗 {build_link(m)}"
+
         if send_telegram(msg):
             seen_signals.add(m["id"] + "-sig")
-            log(f"Signal marché : {m['title'][:50]} ({ds}pts)")
+            log(f"Mouvement : {m['title'][:50]} ({ds}pts)")
+        time.sleep(2)
 
 def send_daily_report(conn):
     count, avg_score, top_sources = get_daily_stats(conn)
