@@ -454,6 +454,82 @@ def build_calendar_alert(event, matched_markets, diff_min):
     msg += f"\n💡 <b>Prépare-toi — ce chiffre va faire bouger Polymarket.</b>"
     return msg
 
+
+# ─── TRACKER DE PROBABILITES ─────────────────────────────────────────────────
+
+prob_history = {}  # {market_id: [(timestamp, prob, volume), ...]}
+
+def update_prob_history(markets):
+    now = time.time()
+    for m in markets:
+        mid = m["id"]
+        if mid not in prob_history:
+            prob_history[mid] = []
+        prob_history[mid].append((now, m["prob"], m["vol"]))
+        # Garder seulement les 24 dernières heures
+        prob_history[mid] = [(t, p, v) for t, p, v in prob_history[mid] if now - t < 86400]
+
+def detect_prob_surges(markets):
+    """Detecte les marches avec montee rapide de probabilite + volume"""
+    now = time.time()
+    surges = []
+    for m in markets:
+        mid = m["id"]
+        history = prob_history.get(mid, [])
+        if len(history) < 2:
+            continue
+
+        # Comparer avec il y a 1h et 3h
+        current_prob = m["prob"]
+        current_vol = m["vol"]
+
+        # Chercher le point il y a ~1h
+        one_hour_ago = [(t, p, v) for t, p, v in history if now - t >= 3000 and now - t <= 5400]
+        three_hours_ago = [(t, p, v) for t, p, v in history if now - t >= 9000 and now - t <= 12600]
+
+        if not one_hour_ago:
+            continue
+
+        old_prob = one_hour_ago[-1][1]
+        old_vol = one_hour_ago[-1][2]
+
+        prob_change_1h = current_prob - old_prob
+        vol_change = ((current_vol - old_vol) / old_vol * 100) if old_vol > 0 else 0
+
+        # Signal fort : prob monte de +8pts en 1h ET volume augmente de +50%
+        if abs(prob_change_1h) >= 8 and vol_change >= 50 and 20 < current_prob < 80:
+            surge_id = f"{mid}-surge"
+            if surge_id not in seen_signals:
+                surges.append({
+                    "market": m,
+                    "prob_change_1h": prob_change_1h,
+                    "vol_change": vol_change,
+                    "old_prob": old_prob,
+                })
+    return surges
+
+def build_surge_alert(surge):
+    m = surge["market"]
+    prob_change = surge["prob_change_1h"]
+    vol_change = surge["vol_change"]
+    old_prob = surge["old_prob"]
+    direction = "montee" if prob_change > 0 else "chute"
+    icon = "🚀" if prob_change > 0 else "📉"
+    d = m["delta"]
+    ds = f"+{d}" if d > 0 else str(d)
+    link = build_link(m)
+    msg = (
+        f"{icon} <b>MOUVEMENT RAPIDE POLYMARKET</b>\n\n"
+        f"📊 {m['title']}\n\n"
+        f"Probabilite : {old_prob}% → <b>{m['prob']}%</b> ({'+' if prob_change > 0 else ''}{prob_change:.0f}pts en 1h)\n"
+        f"Volume : +{vol_change:.0f}% en 1h\n"
+        f"Volume 24h : {fmt_vol(m['vol'])}\n\n"
+        f"💡 <b>Quelqu un sait quelque chose</b> — prob et volume montent simultanement.\n"
+        f"Entre sur <b>{'OUI' if prob_change > 0 else 'NON'}</b> avant que ca continue.\n\n"
+        f"🔗 {link}"
+    )
+    return msg
+
 def run_news_check(conn):
     global seen_news
     log("Scan des sources...")
