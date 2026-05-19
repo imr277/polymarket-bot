@@ -9,13 +9,34 @@ from xml.etree import ElementTree
 
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
+REPORT_TOKEN = os.environ.get("REPORT_TOKEN", "")
+REPORT_CHAT_ID = os.environ.get("REPORT_CHAT_ID", "")
 ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 INTERVAL = int(os.environ.get("INTERVAL_MINUTES", "3"))
 MIN_SCORE = int(os.environ.get("MIN_SCORE", "7"))
 
 TG_URL = f"https://api.telegram.org/bot{TOKEN}"
+REPORT_URL = f"https://api.telegram.org/bot{REPORT_TOKEN}"
 seen_signals = set()
 prob_history = {}
+
+# Historique des signaux pour les rapports
+signals_history = []  # [{id, title, action, prob_entry, prob_current, sent_at}]
+
+def send_report(text):
+    """Envoie sur le bot de rapport séparé"""
+    if not REPORT_TOKEN or not REPORT_CHAT_ID:
+        return False
+    try:
+        r = requests.post(f"{REPORT_URL}/sendMessage", json={
+            "chat_id": REPORT_CHAT_ID,
+            "text": text[:4000],
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }, timeout=10)
+        return r.json().get("ok", False)
+    except:
+        return False
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -374,6 +395,99 @@ def match_news_to_market(news_list, market):
     matched.sort(key=lambda x: x[1], reverse=True)
     return [n for n, _ in matched[:2]]
 
+
+# ─── SYSTÈME DE RAPPORT ──────────────────────────────────────────────────────
+
+last_report_time = time.time()
+
+def track_signal(market, action):
+    """Enregistre un signal envoyé pour le suivi"""
+    signals_history.append({
+        "id": market["id"],
+        "title": market["title"],
+        "action": action,
+        "prob_entry": market["prob"],
+        "prob_current": market["prob"],
+        "sent_at": time.time(),
+        "link": build_link(market),
+        "result": None,
+    })
+    # Garder seulement les 50 derniers signaux
+    if len(signals_history) > 50:
+        signals_history.pop(0)
+
+def update_signal_results(markets):
+    """Met à jour les probabilités actuelles des signaux suivis"""
+    market_probs = {m["id"]: m["prob"] for m in markets}
+    for sig in signals_history:
+        if sig["id"] in market_probs:
+            sig["prob_current"] = market_probs[sig["id"]]
+            # Déterminer le résultat
+            prob_change = sig["prob_current"] - sig["prob_entry"]
+            if sig["action"] == "ACHETER OUI":
+                if prob_change >= 5:
+                    sig["result"] = "WIN"
+                elif prob_change <= -5:
+                    sig["result"] = "LOSE"
+            elif sig["action"] == "ACHETER NON":
+                if prob_change <= -5:
+                    sig["result"] = "WIN"
+                elif prob_change >= 5:
+                    sig["result"] = "LOSE"
+
+def send_daily_report():
+    """Envoie le rapport uniquement quand 5 signaux ou plus sont disponibles"""
+    global last_report_time
+    now = time.time()
+
+    # Minimum 1h entre deux rapports pour eviter le spam
+    if now - last_report_time < 3600:
+        return
+
+    # Attendre d avoir au moins 5 signaux
+    if len(signals_history) < 5:
+        log(f"Rapport en attente : {len(signals_history)}/5 signaux")
+        return
+
+    # Stats
+    total = len(signals_history)
+    wins = len([s for s in signals_history if s["result"] == "WIN"])
+    loses = len([s for s in signals_history if s["result"] == "LOSE"])
+    pending = total - wins - loses
+    win_rate = round(wins / max(total-pending, 1) * 100)
+
+    msg = (
+        f"📊 <b>RAPPORT SIGNAUX POLYMARKET</b>\n"
+        f"{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')} UTC\n\n"
+        f"Total signaux : {total}\n"
+        f"✅ Gagnants : {wins}\n"
+        f"❌ Perdants : {loses}\n"
+        f"⏳ En cours : {pending}\n"
+        f"📈 Taux de réussite : {win_rate}%\n\n"
+    )
+
+    # Détail des derniers signaux
+    msg += "<b>Détail des signaux :</b>\n"
+    for sig in signals_history[-10:]:
+        prob_change = sig["prob_current"] - sig["prob_entry"]
+        ds = f"+{prob_change:.0f}" if prob_change > 0 else f"{prob_change:.0f}"
+        if sig["result"] == "WIN":
+            result_icon = "✅"
+        elif sig["result"] == "LOSE":
+            result_icon = "❌"
+        else:
+            result_icon = "⏳"
+        msg += (
+            f"\n{result_icon} <b>{sig['action']}</b>\n"
+            f"{sig['title'][:55]}\n"
+            f"Entrée : {sig['prob_entry']}% → Actuel : {sig['prob_current']}% ({ds}pts)\n"
+            f"🔗 {sig['link']}\n"
+        )
+
+    send_report(msg)
+    last_report_time = now
+    log("Rapport quotidien envoyé sur bot rapport")
+
 # ─── BOUCLE PRINCIPALE ───────────────────────────────────────────────────────
 
 cycle = 0
@@ -406,6 +520,12 @@ def run():
             new_news.append(n)
 
     log(f"{len(all_markets)} marchés, {len(new_news)} nouvelles news")
+
+    # Mettre à jour les résultats des signaux passés
+    update_signal_results(all_markets)
+
+    # Envoyer le rapport toutes les heures
+    send_daily_report()
 
     # Détecter les opportunités
     opportunities = detect_opportunities(all_markets)
@@ -447,6 +567,7 @@ def run():
 
         if send_telegram(msg):
             seen_signals.add(mid + "-opp")
+            track_signal(m, analysis.get("action", ""))
             sent += 1
             log(f"Alerte envoyée : {m['title'][:50]}")
         time.sleep(3)
