@@ -676,7 +676,7 @@ def main():
     # Message de démarrage sur le bot rapport
     send_report(
         "📊 <b>Bot Rapport Polymarket démarré</b>\n\n"
-        "Tu recevras ici le compte rendu de chaque signal dès que 5 signaux ont été collectés.\n\n"
+        "Tu recevras ici le compte rendu de chaque signal dès que le marché est résolu.\n\n"
         "Format du rapport :\n"
         "✅ Signaux gagnants\n"
         "❌ Signaux perdants\n"
