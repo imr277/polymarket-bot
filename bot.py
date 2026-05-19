@@ -410,6 +410,7 @@ def track_signal(market, action):
         "prob_current": market["prob"],
         "sent_at": time.time(),
         "link": build_link(market),
+        "end_date": market.get("endDate", ""),
         "result": None,
     })
     # Garder seulement les 50 derniers signaux
@@ -435,58 +436,135 @@ def update_signal_results(markets):
                 elif prob_change >= 5:
                     sig["result"] = "LOSE"
 
-def send_daily_report():
-    """Envoie le rapport uniquement quand 5 signaux ou plus sont disponibles"""
-    global last_report_time
+def check_signal_results():
+    """Envoie le résultat uniquement quand le marché est résolu (prob >= 95% ou <= 5%)"""
     now = time.time()
+    for sig in signals_history:
+        # Ignorer si déjà rapporté
+        if sig.get("reported"):
+            continue
 
-    # Minimum 1h entre deux rapports pour eviter le spam
-    if now - last_report_time < 3600:
-        return
+        # Attendre au minimum 30 min
+        if now - sig["sent_at"] < 1800:
+            continue
 
-    # Attendre d avoir au moins 5 signaux
-    if len(signals_history) < 5:
-        log(f"Rapport en attente : {len(signals_history)}/5 signaux")
-        return
+        current_prob = sig["prob_current"]
 
-    # Stats
-    total = len(signals_history)
-    wins = len([s for s in signals_history if s["result"] == "WIN"])
-    loses = len([s for s in signals_history if s["result"] == "LOSE"])
-    pending = total - wins - loses
-    win_rate = round(wins / max(total-pending, 1) * 100)
+        # Marché résolu = prob >= 95% / <= 5% OU date d expiration atteinte
+        resolved_yes = current_prob >= 95
+        resolved_no = current_prob <= 5
 
-    msg = (
-        f"📊 <b>RAPPORT SIGNAUX POLYMARKET</b>\n"
-        f"{datetime.now(timezone.utc).strftime('%d/%m/%Y %H:%M')} UTC\n\n"
-        f"Total signaux : {total}\n"
-        f"✅ Gagnants : {wins}\n"
-        f"❌ Perdants : {loses}\n"
-        f"⏳ En cours : {pending}\n"
-        f"📈 Taux de réussite : {win_rate}%\n\n"
-    )
+        # Vérifier si la date d expiration est passée
+        expired = False
+        end_date = sig.get("end_date", "")
+        if end_date:
+            try:
+                end_dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                expired = datetime.now(timezone.utc) >= end_dt
+            except:
+                pass
 
-    # Détail des derniers signaux
-    msg += "<b>Détail des signaux :</b>\n"
-    for sig in signals_history[-10:]:
+        if not resolved_yes and not resolved_no and not expired:
+            continue  # Pas encore résolu — on attend
+
+        # Si expiré sans résolution claire, utiliser la prob actuelle
+        if expired and not resolved_yes and not resolved_no:
+            resolved_yes = current_prob >= 50
+            resolved_no = current_prob < 50
+
+        # Déterminer le résultat
+        if resolved_yes:
+            resolution = "OUI"
+        else:
+            resolution = "NON"
+
+        if sig["action"] == "ACHETER OUI" and resolved_yes:
+            result = "WIN"
+        elif sig["action"] == "ACHETER NON" and resolved_no:
+            result = "WIN"
+        else:
+            result = "LOSE"
+
+        prob_change = current_prob - sig["prob_entry"]
+        ds = f"+{prob_change:.0f}" if prob_change > 0 else f"{prob_change:.0f}"
+
         prob_change = sig["prob_current"] - sig["prob_entry"]
         ds = f"+{prob_change:.0f}" if prob_change > 0 else f"{prob_change:.0f}"
-        if sig["result"] == "WIN":
-            result_icon = "✅"
-        elif sig["result"] == "LOSE":
-            result_icon = "❌"
+
+        # Déterminer le résultat
+        if sig["action"] == "ACHETER OUI":
+            if prob_change >= 5:
+                result = "WIN"
+                result_icon = "✅"
+                result_label = "GAGNANT"
+            elif prob_change <= -5:
+                result = "LOSE"
+                result_icon = "❌"
+                result_label = "PERDANT"
+            else:
+                result = "NEUTRAL"
+                result_icon = "➡️"
+                result_label = "NEUTRE"
+        elif sig["action"] == "ACHETER NON":
+            if prob_change <= -5:
+                result = "WIN"
+                result_icon = "✅"
+                result_label = "GAGNANT"
+            elif prob_change >= 5:
+                result = "LOSE"
+                result_icon = "❌"
+                result_label = "PERDANT"
+            else:
+                result = "NEUTRAL"
+                result_icon = "➡️"
+                result_label = "NEUTRE"
         else:
-            result_icon = "⏳"
-        msg += (
-            f"\n{result_icon} <b>{sig['action']}</b>\n"
-            f"{sig['title'][:55]}\n"
-            f"Entrée : {sig['prob_entry']}% → Actuel : {sig['prob_current']}% ({ds}pts)\n"
-            f"🔗 {sig['link']}\n"
+            result = "NEUTRAL"
+            result_icon = "➡️"
+            result_label = "NEUTRE"
+
+        sig["result"] = result
+        sig["reported"] = True
+
+        sent_at_str = datetime.fromtimestamp(sig["sent_at"], tz=timezone.utc).strftime("%d/%m %H:%M")
+        resolved_at_str = datetime.now(timezone.utc).strftime("%d/%m %H:%M")
+
+        if sig["action"] == "ACHETER OUI":
+            action_icon = "🟢"
+        elif sig["action"] == "ACHETER NON":
+            action_icon = "🔴"
+        else:
+            action_icon = "⚪"
+
+        result_icon = "✅" if result == "WIN" else "❌"
+        result_label = "GAGNANT" if result == "WIN" else "PERDANT"
+
+        msg = (
+            f"{result_icon} <b>MARCHÉ RÉSOLU — {result_label}</b>\n\n"
+            f"📊 {sig['title']}\n\n"
+            f"━━━━━━━━━━━━━\n"
+            f"{action_icon} Action prise : <b>{sig['action']}</b>\n"
+            f"Signal le : {sent_at_str} UTC\n"
+            f"Prob au signal : {sig['prob_entry']}%\n"
+            f"━━━━━━━━━━━━━\n"
+            f"Résultat : <b>{resolution}</b>\n"
+            f"Prob finale : {current_prob}% ({ds}pts)\n"
+            f"Résolu le : {resolved_at_str} UTC\n"
+            f"━━━━━━━━━━━━━\n\n"
         )
 
-    send_report(msg)
-    last_report_time = now
-    log("Rapport quotidien envoyé sur bot rapport")
+        if expired and not (current_prob >= 95 or current_prob <= 5):
+            msg += "⏰ Marché clôturé à la date d expiration.\n"
+        if result == "WIN":
+            msg += "✅ Tu avais le bon côté — signal validé !\n"
+        else:
+            msg += "❌ Le marché a résolu dans l autre sens.\n"
+
+        msg += f"\n🔗 {sig['link']}"
+
+        send_report(msg)
+        log(f"Résultat signal envoyé : {sig['title'][:50]} → {result_label}")
+        time.sleep(2)
 
 # ─── BOUCLE PRINCIPALE ───────────────────────────────────────────────────────
 
@@ -524,8 +602,8 @@ def run():
     # Mettre à jour les résultats des signaux passés
     update_signal_results(all_markets)
 
-    # Envoyer le rapport toutes les heures
-    send_daily_report()
+    # Vérifier les résultats des signaux après 24h
+    check_signal_results()
 
     # Détecter les opportunités
     opportunities = detect_opportunities(all_markets)
@@ -565,12 +643,12 @@ def run():
                 if n.get("link"):
                     msg += f"\n  🔗 {n['link']}"
 
-        if send_telegram(msg):
-            seen_signals.add(mid + "-opp")
-            track_signal(m, analysis.get("action", ""))
-            sent += 1
-            log(f"Alerte envoyée : {m['title'][:50]}")
-        time.sleep(3)
+        # Enregistrer le signal silencieusement — résultat envoyé 24h après
+        seen_signals.add(mid + "-opp")
+        track_signal(m, analysis.get("action", ""))
+        sent += 1
+        log(f"Signal enregistré : {m['title'][:50]} — résultat dans 24h")
+        time.sleep(1)
 
         if sent >= 3:
             break
