@@ -271,6 +271,42 @@ def analyze_opportunity(opp):
         log(f"Claude error: {e}")
         return None
 
+def build_default_analysis(opp):
+    """Génère une analyse automatique sans Claude basée sur les données"""
+    m = opp["market"]
+    delta = m["delta"]
+    prob = m["prob"]
+    prob_change = opp["prob_change_1h"]
+    vol_change = opp["vol_change_1h"]
+
+    # Déterminer l action selon la direction du mouvement
+    if delta > 0 or prob_change > 0:
+        action = "ACHETER OUI"
+        conviction = "FORTE" if opp["score"] >= 7 else "MOYENNE"
+        analyse = f"La probabilite monte ({'+' if delta>0 else ''}{delta}pts/24h"
+        if abs(prob_change) >= 5:
+            analyse += f", +{prob_change:.0f}pts/1h"
+        analyse += f"). Volume : {fmt_vol(m['vol'])}."
+        if vol_change >= 30:
+            analyse += f" Surge de volume +{vol_change:.0f}% — signal fort."
+    else:
+        action = "ACHETER NON"
+        conviction = "FORTE" if opp["score"] >= 7 else "MOYENNE"
+        analyse = f"La probabilite baisse ({delta}pts/24h"
+        if abs(prob_change) >= 5:
+            analyse += f", {prob_change:.0f}pts/1h"
+        analyse += f"). Volume : {fmt_vol(m['vol'])}."
+        if vol_change >= 30:
+            analyse += f" Surge de volume +{vol_change:.0f}% — signal fort."
+
+    return {
+        "exploitable": True,
+        "action": action,
+        "conviction": conviction,
+        "analyse": analyse,
+        "risque": "Verifier les actualites liees avant d entrer."
+    }
+
 def build_opportunity_alert(opp, analysis):
     m = opp["market"]
     action = analysis.get("action", "")
@@ -617,20 +653,18 @@ def run():
         # Trouver les news liées
         related_news = match_news_to_market(new_news + news[:50], m)
 
-        # Analyser avec Claude
-        log(f"Analyse : {m['title'][:60]}")
-        analysis = analyze_opportunity(opp)
-
-        if not analysis:
-            continue
-
-        if not analysis.get("exploitable", False):
-            log(f"Non exploitable : {m['title'][:50]}")
-            continue
-
-        if analysis.get("action") == "PASSER":
-            log(f"Action PASSER : {m['title'][:50]}")
-            continue
+        # Score 9+ → analyse Claude, sinon alerte directe
+        if opp["score"] >= 9:
+            log(f"Analyse Claude (score {opp['score']}) : {m['title'][:60]}")
+            analysis = analyze_opportunity(opp)
+            if not analysis:
+                analysis = build_default_analysis(opp)
+            if analysis.get("action") == "PASSER":
+                log(f"Action PASSER : {m['title'][:50]}")
+                continue
+        else:
+            log(f"Alerte directe (score {opp['score']}) : {m['title'][:60]}")
+            analysis = build_default_analysis(opp)
 
         # Construire et envoyer l'alerte
         msg = build_opportunity_alert(opp, analysis)
@@ -676,7 +710,7 @@ def main():
     # Message de démarrage sur le bot rapport
     send_report(
         "📊 <b>Bot Rapport Polymarket démarré</b>\n\n"
-        "Tu recevras ici le compte rendu de chaque signal dès que le marché est résolu.\n\n"
+        "Tu recevras ici le compte rendu de chaque signal dès que 5 signaux ont été collectés.\n\n"
         "Format du rapport :\n"
         "✅ Signaux gagnants\n"
         "❌ Signaux perdants\n"
