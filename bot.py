@@ -20,15 +20,8 @@ prob_history = {}
 signals_history = []
 seen_news = set()
 
-# Quota max par catégorie par cycle
-CAT_QUOTA = {
-    "geopolitics": 2,
-    "crypto": 2,
-    "economics": 2,
-    "politics": 2,
-    "sports": 1,
-    "other": 1,
-}
+CAT_QUOTA = {"geopolitics": 2, "crypto": 2, "economics": 2, "politics": 2, "sports": 1, "other": 1}
+CAT_LABELS = {"sports": "Sport", "crypto": "Crypto", "politics": "Politique", "geopolitics": "Geopolitique", "economics": "Economie", "other": "Autre"}
 
 def log(msg):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
@@ -36,10 +29,8 @@ def log(msg):
 def send_telegram(text):
     try:
         r = requests.post(f"{TG_URL}/sendMessage", json={
-            "chat_id": CHAT_ID,
-            "text": text[:4000],
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
+            "chat_id": CHAT_ID, "text": text[:4000],
+            "parse_mode": "HTML", "disable_web_page_preview": True
         }, timeout=10)
         data = r.json()
         if not data.get("ok"):
@@ -55,10 +46,8 @@ def send_report(text):
         return False
     try:
         r = requests.post(f"{REPORT_URL}/sendMessage", json={
-            "chat_id": REPORT_CHAT_ID,
-            "text": text[:4000],
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True
+            "chat_id": REPORT_CHAT_ID, "text": text[:4000],
+            "parse_mode": "HTML", "disable_web_page_preview": True
         }, timeout=10)
         return r.json().get("ok", False)
     except:
@@ -72,32 +61,62 @@ def fmt_vol(n):
     if n >= 1_000: return f"${round(n/1_000)}K"
     return f"${round(n)}"
 
-# ─── CATÉGORISATION ──────────────────────────────────────────────────────────
-
 def guess_cat(title):
     t = (title or "").lower()
-    if any(k in t for k in ["nba","nfl","nhl","mlb","cup","champion","league","football","soccer","tennis","sport","match","game","season","olympics","rugby","formula","f1","ufc","boxing","golf","nascar","playoff","tournament","series","pitcher","quarterback","midfielder","coach","team","player","score","goal","win","lose","draw","championship","semifinal","final","qualifier"]):
+    if any(k in t for k in ["nba","nfl","nhl","mlb","cup","champion","league","football","soccer","tennis","sport","match","game","season","olympics","rugby","formula","f1","ufc","boxing","golf","playoff","tournament","pitcher","quarterback","coach","championship","semifinal","qualifier"]):
         return "sports"
-    if any(k in t for k in ["bitcoin","btc","eth","crypto","solana","token","defi","blockchain","nft","coinbase","binance","ethereum","web3"]):
+    if any(k in t for k in ["bitcoin","btc","eth","crypto","solana","token","defi","blockchain","nft","coinbase","binance","ethereum"]):
         return "crypto"
-    if any(k in t for k in ["election","president","trump","biden","democrat","republican","vote","minister","parliament","congress","senate","governor","mayor","poll","ballot","primary","caucus"]):
+    if any(k in t for k in ["election","president","trump","biden","democrat","republican","vote","minister","parliament","congress","senate","governor","poll","ballot","primary"]):
         return "politics"
-    if any(k in t for k in ["iran","russia","ukraine","china","war","peace","nuclear","military","nato","conflict","missile","troops","sanction","taiwan","israel","gaza","hamas","ceasefire","treaty","diplomat"]):
+    if any(k in t for k in ["iran","russia","ukraine","china","war","peace","nuclear","military","nato","conflict","missile","troops","sanction","taiwan","israel","gaza","hamas","ceasefire","treaty"]):
         return "geopolitics"
-    if any(k in t for k in ["fed","rate","inflation","gdp","recession","stock","economy","dollar","oil","gold","tariff","trade","interest","bond","market","unemployment","cpi","nfp","ecb","bce"]):
+    if any(k in t for k in ["fed","rate","inflation","gdp","recession","stock","economy","dollar","oil","gold","tariff","trade","interest","bond","unemployment","cpi","nfp","ecb"]):
         return "economics"
     return "other"
 
-CAT_LABELS = {
-    "sports": "Sport",
-    "crypto": "Crypto",
-    "politics": "Politique",
-    "geopolitics": "Geopolitique",
-    "economics": "Economie",
-    "other": "Autre"
-}
+# ─── FILTRES STRICTS ──────────────────────────────────────────────────────────
 
-# ─── MARCHÉS ─────────────────────────────────────────────────────────────────
+def days_until_expiry(m):
+    end = m.get("endDate", "")
+    if not end:
+        return 999
+    try:
+        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        return (end_dt - datetime.now(timezone.utc)).days
+    except:
+        return 999
+
+def passes_strict_filters(m):
+    """Filtres obligatoires — si un seul échoue, le marché est ignoré"""
+    prob = m["prob"]
+    vol = m["vol"]
+    delta = m["delta"]
+    days = days_until_expiry(m)
+
+    # 1. Probabilité encore incertaine
+    if prob < 25 or prob > 75:
+        return False, "prob trop extremes"
+
+    # 2. Volume minimum suffisant
+    if vol < 5000:
+        return False, f"volume trop bas ({fmt_vol(vol)})"
+
+    # 3. Variation significative mais pas une résolution
+    if abs(delta) < 8:
+        return False, "variation insuffisante"
+    if abs(delta) > 45:
+        return False, "marche presque resolu"
+
+    # 4. Expiration dans 3 à 30 jours
+    if days < 3:
+        return False, "expire dans moins de 3 jours"
+    if days > 30:
+        return False, f"expire dans {days} jours (trop loin)"
+
+    return True, "ok"
+
+# ─── MARCHES ─────────────────────────────────────────────────────────────────
 
 def fetch_markets_page(offset=0, limit=100):
     try:
@@ -135,7 +154,7 @@ def fetch_markets_page(offset=0, limit=100):
                 })
         return result
     except Exception as e:
-        log(f"Fetch error offset={offset}: {e}")
+        log(f"Fetch error: {e}")
         return []
 
 def fetch_all_markets():
@@ -156,19 +175,7 @@ def build_link(m):
         return f"https://polymarket.com/event/{event_slug}"
     if slug and not slug.isdigit() and len(slug) > 5:
         return f"https://polymarket.com/event/{slug}"
-    query = m["title"][:60].replace(" ", "%20")
-    return f"https://polymarket.com/search?q={query}"
-
-def is_expiring_soon(m, max_days=30):
-    end = m.get("endDate", "")
-    if not end:
-        return True
-    try:
-        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
-        days_left = (end_dt - datetime.now(timezone.utc)).days
-        return 0 < days_left <= max_days
-    except:
-        return True
+    return f"https://polymarket.com/search?q={m['title'][:60].replace(' ', '%20')}"
 
 # ─── HISTORIQUE PROBABILITES ─────────────────────────────────────────────────
 
@@ -190,21 +197,33 @@ def get_prob_change(market_id, minutes_ago=60):
         return None, None
     return old_points[-1][1], old_points[-1][2]
 
-# ─── DÉTECTION OPPORTUNITÉS AVEC QUOTA ───────────────────────────────────────
+# ─── DETECTION OPPORTUNITES ──────────────────────────────────────────────────
 
 def detect_opportunities(markets):
     scored = []
+    filtered_out = {"prob": 0, "volume": 0, "delta": 0, "expiry": 0}
+
     for m in markets:
         mid = m["id"]
+
+        # Filtres stricts obligatoires
+        passes, reason = passes_strict_filters(m)
+        if not passes:
+            if "prob" in reason: filtered_out["prob"] += 1
+            elif "volume" in reason: filtered_out["volume"] += 1
+            elif "resolu" in reason or "variation" in reason: filtered_out["delta"] += 1
+            elif "jours" in reason: filtered_out["expiry"] += 1
+            continue
+
+        if mid + "-opp" in seen_signals:
+            continue
+
+        # Score de qualité
         prob = m["prob"]
         vol = m["vol"]
         delta = m["delta"]
         cat = m["cat"]
-
-        if prob <= 2 or prob >= 98:
-            continue
-        if vol < 500:
-            continue
+        days = days_until_expiry(m)
 
         old_prob_1h, old_vol_1h = get_prob_change(mid, 60)
         prob_change_1h = (prob - old_prob_1h) if old_prob_1h is not None else 0
@@ -213,51 +232,53 @@ def detect_opportunities(markets):
         score = 0
         reasons = []
 
-        if abs(delta) >= 8 and abs(delta) < 50:
-            score += 2
-            reasons.append(f"variation {'+' if delta>0 else ''}{delta}pts/24h")
+        # Variation 24h
+        if abs(delta) >= 15:
+            score += 3
+            reasons.append(f"{'+' if delta>0 else ''}{delta}pts/24h")
+        elif abs(delta) >= 8:
+            score += 1
+            reasons.append(f"{'+' if delta>0 else ''}{delta}pts/24h")
 
+        # Surge 1h
         if abs(prob_change_1h) >= 5 and vol_change_1h >= 30:
             score += 3
-            reasons.append(f"surge {'+' if prob_change_1h>0 else ''}{prob_change_1h:.0f}pts/1h (+{vol_change_1h:.0f}% vol)")
+            reasons.append(f"surge {'+' if prob_change_1h>0 else ''}{prob_change_1h:.0f}pts/1h")
 
-        if vol >= 50000:
+        # Volume
+        if vol >= 100000:
+            score += 3
+        elif vol >= 50000:
             score += 2
-            reasons.append("volume eleve")
         elif vol >= 10000:
             score += 1
-            reasons.append("volume correct")
 
-        if 30 <= prob <= 70:
+        # Expiration imminente (plus urgent = plus intéressant)
+        if days <= 7:
             score += 2
-            reasons.append("prob incertaine")
-
-        if is_expiring_soon(m, 30):
+        elif days <= 14:
             score += 1
-            reasons.append("expire bientot")
 
-        # Bonus pour catégories prioritaires
+        # Bonus catégories prioritaires
         if cat in ["geopolitics", "economics", "crypto", "politics"]:
             score += 1
 
-        # Exclure les marchés qui expirent dans plus de 30 jours
-        if not is_expiring_soon(m, 30):
-            continue
+        scored.append({
+            "market": m,
+            "score": score,
+            "reasons": reasons,
+            "prob_change_1h": prob_change_1h,
+            "vol_change_1h": vol_change_1h,
+            "cat": cat,
+            "days": days,
+        })
 
-        if score >= 4 and mid + "-opp" not in seen_signals:
-            scored.append({
-                "market": m,
-                "score": score,
-                "reasons": reasons,
-                "prob_change_1h": prob_change_1h,
-                "vol_change_1h": vol_change_1h,
-                "cat": cat,
-            })
+    log(f"Filtres: prob={filtered_out['prob']} vol={filtered_out['volume']} delta={filtered_out['delta']} expiry={filtered_out['expiry']}")
 
-    # Trier par score puis volume
+    # Trier par score
     scored.sort(key=lambda x: (x["score"], x["market"]["vol"]), reverse=True)
 
-    # Appliquer le quota par catégorie
+    # Appliquer quota par catégorie
     cat_counts = {cat: 0 for cat in CAT_QUOTA}
     selected = []
     for opp in scored:
@@ -266,7 +287,7 @@ def detect_opportunities(markets):
         if cat_counts.get(cat, 0) < quota:
             selected.append(opp)
             cat_counts[cat] = cat_counts.get(cat, 0) + 1
-        if len(selected) >= 6:
+        if len(selected) >= 5:
             break
 
     return selected
@@ -281,30 +302,24 @@ def build_default_analysis(opp):
 
     if delta > 0 or prob_change > 0:
         action = "ACHETER OUI"
-        conviction = "FORTE" if opp["score"] >= 7 else "MOYENNE"
+        conviction = "FORTE" if opp["score"] >= 5 else "MOYENNE"
         analyse = f"Prob en hausse ({'+' if delta>0 else ''}{delta}pts/24h"
         if abs(prob_change) >= 5:
             analyse += f", +{prob_change:.0f}pts/1h"
         analyse += f"). Vol : {fmt_vol(m['vol'])}."
         if vol_change >= 30:
-            analyse += f" Surge +{vol_change:.0f}%."
+            analyse += f" Surge volume +{vol_change:.0f}%."
     else:
         action = "ACHETER NON"
-        conviction = "FORTE" if opp["score"] >= 7 else "MOYENNE"
+        conviction = "FORTE" if opp["score"] >= 5 else "MOYENNE"
         analyse = f"Prob en baisse ({delta}pts/24h"
         if abs(prob_change) >= 5:
             analyse += f", {prob_change:.0f}pts/1h"
         analyse += f"). Vol : {fmt_vol(m['vol'])}."
         if vol_change >= 30:
-            analyse += f" Surge +{vol_change:.0f}%."
+            analyse += f" Surge volume +{vol_change:.0f}%."
 
-    return {
-        "exploitable": True,
-        "action": action,
-        "conviction": conviction,
-        "analyse": analyse,
-        "risque": "Verifier les actualites liees avant d entrer."
-    }
+    return {"action": action, "conviction": conviction, "analyse": analyse, "risque": "Verifier les actualites avant d entrer."}
 
 def analyze_with_claude(opp):
     if not ANTHROPIC_KEY:
@@ -316,12 +331,11 @@ def analyze_with_claude(opp):
         "Tu es un trader expert en marches de prediction Polymarket.\n\n"
         f"MARCHE : {m['title']}\n"
         f"Categorie : {CAT_LABELS.get(opp['cat'], 'Autre')}\n"
-        f"Probabilite : {m['prob']}%\n"
-        f"Variation 24h : {'+' if m['delta']>0 else ''}{m['delta']}pts\n"
-        f"Variation 1h : {'+' if prob_change>0 else ''}{prob_change:.0f}pts\n"
-        f"Volume 24h : {fmt_vol(m['vol'])}\n"
+        f"Probabilite : {m['prob']}% | Variation 24h : {'+' if m['delta']>0 else ''}{m['delta']}pts\n"
+        f"Variation 1h : {'+' if prob_change>0 else ''}{prob_change:.0f}pts | Volume : {fmt_vol(m['vol'])}\n"
+        f"Expire dans : {opp['days']} jours\n"
         f"Signaux : {reasons_str}\n\n"
-        'Reponds UNIQUEMENT en JSON : {"exploitable": <true/false>, "action": "<ACHETER OUI/ACHETER NON/PASSER>", "conviction": "<FORTE/MOYENNE/FAIBLE>", "analyse": "<2 phrases max en francais>", "risque": "<1 phrase>"}'
+        'Reponds UNIQUEMENT en JSON : {"action": "<ACHETER OUI/ACHETER NON/PASSER>", "conviction": "<FORTE/MOYENNE/FAIBLE>", "analyse": "<2 phrases max en francais>", "risque": "<1 phrase>"}'
     )
     try:
         r = requests.post(
@@ -346,15 +360,14 @@ def build_alert(opp, analysis):
     vol_change = opp["vol_change_1h"]
     score = opp["score"]
     cat = opp["cat"]
+    days = opp["days"]
 
-    icon = "🟢" if action == "ACHETER OUI" else "🔴" if action == "ACHETER NON" else "⚪"
+    icon = "🟢" if action == "ACHETER OUI" else "🔴"
     conv_icon = "🔥" if conviction == "FORTE" else "🟡"
-    ai_label = "🤖 IA" if score >= 9 else "📊 Auto"
-    cat_label = CAT_LABELS.get(cat, "Autre")
+    ai_label = "🤖 IA" if score >= 9 else "📊"
 
     msg = (
-        f"{icon} <b>OPPORTUNITE POLYMARKET [{score}/10]</b>\n"
-        f"<i>{cat_label}</i>\n\n"
+        f"{icon} <b>OPPORTUNITE [{score}pts] — {CAT_LABELS.get(cat, 'Autre').upper()}</b>\n\n"
         f"📊 {m['title']}\n\n"
         f"Prob : <b>{m['prob']}%</b> ({'+' if m['delta']>0 else ''}{m['delta']}pts/24h)\n"
     )
@@ -362,7 +375,7 @@ def build_alert(opp, analysis):
         msg += f"1h : {'+' if prob_change>0 else ''}{prob_change:.0f}pts\n"
     if vol_change >= 20:
         msg += f"Volume : +{vol_change:.0f}% en 1h\n"
-    msg += f"Vol 24h : {fmt_vol(m['vol'])}\n\n"
+    msg += f"Vol 24h : {fmt_vol(m['vol'])} | Expire : {days}j\n\n"
     msg += f"{conv_icon} <b>{action}</b> — {conviction} {ai_label}\n\n"
     msg += f"💡 {analyse}\n"
     if risque:
@@ -423,30 +436,21 @@ def check_signal_results():
             resolved_no = current_prob < 50
 
         resolution = "OUI" if resolved_yes else "NON"
-
-        if sig["action"] == "ACHETER OUI" and resolved_yes:
-            result = "WIN"
-        elif sig["action"] == "ACHETER NON" and resolved_no:
-            result = "WIN"
-        else:
-            result = "LOSE"
-
+        result = "WIN" if (sig["action"] == "ACHETER OUI" and resolved_yes) or (sig["action"] == "ACHETER NON" and resolved_no) else "LOSE"
         sig["reported"] = True
+
         prob_change = current_prob - sig["prob_entry"]
         ds = f"+{prob_change:.0f}" if prob_change > 0 else f"{prob_change:.0f}"
         sent_at_str = datetime.fromtimestamp(sig["sent_at"], tz=timezone.utc).strftime("%d/%m %H:%M")
         resolved_at_str = datetime.now(timezone.utc).strftime("%d/%m %H:%M")
         result_icon = "✅" if result == "WIN" else "❌"
-        result_label = "GAGNANT" if result == "WIN" else "PERDANT"
-        action_icon = "🟢" if sig["action"] == "ACHETER OUI" else "🔴"
-        cat_label = CAT_LABELS.get(sig.get("cat","other"), "Autre")
 
         msg = (
-            f"{result_icon} <b>MARCHE RESOLU — {result_label}</b>\n"
-            f"<i>{cat_label}</i>\n\n"
+            f"{result_icon} <b>MARCHE RESOLU — {'GAGNANT' if result == 'WIN' else 'PERDANT'}</b>\n"
+            f"<i>{CAT_LABELS.get(sig.get('cat','other'), 'Autre')}</i>\n\n"
             f"📊 {sig['title']}\n\n"
             f"━━━━━━━━━━━━━\n"
-            f"{action_icon} Action : <b>{sig['action']}</b>\n"
+            f"{'🟢' if sig['action'] == 'ACHETER OUI' else '🔴'} Action : <b>{sig['action']}</b>\n"
             f"Signal le : {sent_at_str} UTC\n"
             f"Prob au signal : {sig['prob_entry']}%\n"
             f"━━━━━━━━━━━━━\n"
@@ -461,33 +465,30 @@ def check_signal_results():
         msg += f"\n🔗 {sig['link']}"
 
         send_report(msg)
-        log(f"Resultat envoye : {sig['title'][:50]} → {result_label}")
+        log(f"Resultat : {sig['title'][:50]} → {'WIN' if result == 'WIN' else 'LOSE'}")
         time.sleep(2)
 
 # ─── SOURCES NEWS ────────────────────────────────────────────────────────────
 
 NEWS_SOURCES = [
-    {"name": "Reuters",         "url": "https://feeds.reuters.com/reuters/topNews"},
-    {"name": "AP News",         "url": "https://rsshub.app/apnews/topics/apf-topnews"},
-    {"name": "BBC World",       "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
-    {"name": "Al Jazeera",      "url": "https://www.aljazeera.com/xml/rss/all.xml"},
-    {"name": "Politico",        "url": "https://rss.politico.com/politics-news.xml"},
-    {"name": "CoinDesk",        "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
-    {"name": "MarketWatch",     "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories"},
-    {"name": "Fed Reserve",     "url": "https://www.federalreserve.gov/feeds/press_all.xml"},
-    {"name": "White House",     "url": "https://www.whitehouse.gov/feed/"},
-    {"name": "r/Polymarket",    "url": "https://www.reddit.com/r/Polymarket/hot.json?limit=15", "type": "reddit"},
-    {"name": "@disclosetv",     "url": "https://rsshub.app/telegram/channel/disclosetv"},
-    {"name": "@sentdefender",   "url": "https://rsshub.app/telegram/channel/sentdefender"},
-    {"name": "@BreakingNews",   "url": "https://rsshub.app/telegram/channel/BreakingNews"},
+    {"name": "Reuters",      "url": "https://feeds.reuters.com/reuters/topNews"},
+    {"name": "AP News",      "url": "https://rsshub.app/apnews/topics/apf-topnews"},
+    {"name": "BBC World",    "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
+    {"name": "Al Jazeera",   "url": "https://www.aljazeera.com/xml/rss/all.xml"},
+    {"name": "Politico",     "url": "https://rss.politico.com/politics-news.xml"},
+    {"name": "CoinDesk",     "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
+    {"name": "MarketWatch",  "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories"},
+    {"name": "Fed Reserve",  "url": "https://www.federalreserve.gov/feeds/press_all.xml"},
+    {"name": "White House",  "url": "https://www.whitehouse.gov/feed/"},
+    {"name": "r/Polymarket", "url": "https://www.reddit.com/r/Polymarket/hot.json?limit=15", "type": "reddit"},
+    {"name": "@disclosetv",  "url": "https://rsshub.app/telegram/channel/disclosetv"},
+    {"name": "@sentdefender","url": "https://rsshub.app/telegram/channel/sentdefender"},
+    {"name": "@BreakingNews","url": "https://rsshub.app/telegram/channel/BreakingNews"},
 ]
 
 def fetch_rss(src):
     try:
-        r = requests.get(
-            "https://api.allorigins.win/get?url=" + requests.utils.quote(src["url"]),
-            timeout=8
-        )
+        r = requests.get("https://api.allorigins.win/get?url=" + requests.utils.quote(src["url"]), timeout=8)
         j = r.json()
         xml = ElementTree.fromstring(j["contents"])
         items = xml.findall(".//item") or xml.findall(".//{http://www.w3.org/2005/Atom}entry")
@@ -509,15 +510,10 @@ def fetch_reddit(src):
         news = []
         for p in posts:
             d = p.get("data", {})
-            if d.get("stickied"):
-                continue
+            if d.get("stickied"): continue
             title = d.get("title", "")
             if title and len(title) > 10:
-                news.append({
-                    "title": title,
-                    "link": "https://reddit.com" + d.get("permalink", ""),
-                    "source": src["name"]
-                })
+                news.append({"title": title, "link": "https://reddit.com" + d.get("permalink", ""), "source": src["name"]})
         return news
     except:
         return []
@@ -533,11 +529,10 @@ def fetch_all_news():
 
 def match_news_to_market(news_list, market):
     stop = {"the","a","an","is","are","to","of","in","on","at","by","for","and","or","be","it","will","has","have","was","were","not","with","from","that","this","do","can","if","but"}
-    mkt_words = set(market["title"].lower().replace("?","").replace(",","").split()) - stop
-    mkt_words = {w for w in mkt_words if len(w) > 3}
+    mkt_words = {w for w in market["title"].lower().replace("?","").replace(",","").split() if len(w) > 3} - stop
     matched = []
     for n in news_list:
-        news_words = set(n["title"].lower().replace("?","").replace(",","").split()) - stop
+        news_words = {w for w in n["title"].lower().replace("?","").replace(",","").split() if len(w) > 3} - stop
         common = mkt_words & news_words
         if len(common) >= 2:
             matched.append((n, len(common)))
@@ -551,7 +546,6 @@ all_markets_cache = []
 
 def run():
     global cycle, all_markets_cache, seen_news
-
     cycle += 1
     log(f"=== Cycle #{cycle} ===")
 
@@ -572,15 +566,8 @@ def run():
             seen_news.add(nid)
             new_news.append(n)
 
-    # Stats par catégorie
-    cat_counts = {}
-    for m in all_markets_cache:
-        cat = m["cat"]
-        cat_counts[cat] = cat_counts.get(cat, 0) + 1
-    log(f"Marches par cat : {cat_counts}")
-
     opportunities = detect_opportunities(all_markets_cache)
-    log(f"{len(opportunities)} opportunites (quota applique)")
+    log(f"{len(opportunities)} opportunites selectionnees")
 
     sent = 0
     for opp in opportunities:
@@ -609,10 +596,10 @@ def run():
             seen_signals.add(mid + "-opp")
             track_signal(m, analysis.get("action", ""))
             sent += 1
-            log(f"Signal envoye [{opp['cat']}] : {m['title'][:50]}")
+            log(f"Signal [{opp['cat']}] score={opp['score']} : {m['title'][:50]}")
         time.sleep(2)
 
-        if sent >= 6:
+        if sent >= 5:
             break
 
     if sent == 0:
@@ -627,12 +614,11 @@ def main():
     send_telegram(
         "🟢 <b>Bot Polymarket Intelligence v4</b>\n\n"
         "✅ 500+ marches scannes\n"
-        "✅ Quota par categorie (max 1 sport / cycle)\n"
+        "✅ Filtres stricts : prob 25-75%, vol $5K+, expiration 3-30 jours\n"
+        "✅ Max 1 signal sportif par cycle\n"
         "✅ Priorite : Geopolitique, Crypto, Economie, Politique\n"
-        "✅ Analyse IA sur signaux forts (score 9+)\n"
-        "✅ Resultats sur bot rapport\n"
-        f"✅ Scan toutes les {INTERVAL} min\n\n"
-        "Tu recevras max 1 signal sportif par cycle — priorite aux autres categories."
+        "✅ Resultats sur bot rapport quand marche resolu\n"
+        f"✅ Scan toutes les {INTERVAL} min"
     )
 
     send_report(
@@ -640,7 +626,7 @@ def main():
         "Tu recevras ici le resultat de chaque signal\n"
         "des que le marche est resolu.\n\n"
         "✅ GAGNANT — signal valide\n"
-        "❌ PERDANT — mauvais sens\n"
+        "❌ PERDANT — mauvais sens"
     )
 
     log("Chargement initial...")
