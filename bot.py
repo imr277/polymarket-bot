@@ -240,6 +240,10 @@ def detect_opportunities(markets):
         if cat in ["geopolitics", "economics", "crypto", "politics"]:
             score += 1
 
+        # Exclure les marchés qui expirent dans plus de 30 jours
+        if not is_expiring_soon(m, 30):
+            continue
+
         if score >= 4 and mid + "-opp" not in seen_signals:
             scored.append({
                 "market": m,
