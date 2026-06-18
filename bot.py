@@ -104,8 +104,8 @@ def passes_strict_filters(m):
         return False, "expire trop tot"
     if days > 30:
         return False, "expire trop loin"
-    if prob <= 3 or prob >= 97:
-        return False, "marche resolu"
+    if prob < 25 or prob > 75:
+        return False, "prob hors zone exploitable"
     return True, "ok"
 
 def build_link(m):
