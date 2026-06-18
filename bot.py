@@ -94,25 +94,25 @@ def passes_strict_filters(m):
     delta = m["delta"]
     days = days_until_expiry(m)
 
-    # 1. Probabilité encore incertaine
-    if prob < 25 or prob > 75:
-        return False, "prob trop extremes"
-
-    # 2. Volume minimum suffisant
+    # 1. Volume minimum — marché liquide
     if vol < 5000:
         return False, f"volume trop bas ({fmt_vol(vol)})"
 
-    # 3. Variation significative mais pas une résolution
+    # 2. Variation significative mais pas une résolution
     if abs(delta) < 8:
         return False, "variation insuffisante"
     if abs(delta) > 45:
         return False, "marche presque resolu"
 
-    # 4. Expiration dans 3 à 30 jours
+    # 3. Expiration dans 3 à 30 jours
     if days < 3:
         return False, "expire dans moins de 3 jours"
     if days > 30:
         return False, f"expire dans {days} jours (trop loin)"
+
+    # 4. Pas complètement résolu
+    if prob <= 3 or prob >= 97:
+        return False, "marche resolu"
 
     return True, "ok"
 
@@ -471,19 +471,58 @@ def check_signal_results():
 # ─── SOURCES NEWS ────────────────────────────────────────────────────────────
 
 NEWS_SOURCES = [
-    {"name": "Reuters",      "url": "https://feeds.reuters.com/reuters/topNews"},
-    {"name": "AP News",      "url": "https://rsshub.app/apnews/topics/apf-topnews"},
-    {"name": "BBC World",    "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
-    {"name": "Al Jazeera",   "url": "https://www.aljazeera.com/xml/rss/all.xml"},
-    {"name": "Politico",     "url": "https://rss.politico.com/politics-news.xml"},
-    {"name": "CoinDesk",     "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
-    {"name": "MarketWatch",  "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories"},
-    {"name": "Fed Reserve",  "url": "https://www.federalreserve.gov/feeds/press_all.xml"},
-    {"name": "White House",  "url": "https://www.whitehouse.gov/feed/"},
-    {"name": "r/Polymarket", "url": "https://www.reddit.com/r/Polymarket/hot.json?limit=15", "type": "reddit"},
-    {"name": "@disclosetv",  "url": "https://rsshub.app/telegram/channel/disclosetv"},
-    {"name": "@sentdefender","url": "https://rsshub.app/telegram/channel/sentdefender"},
-    {"name": "@BreakingNews","url": "https://rsshub.app/telegram/channel/BreakingNews"},
+    # GEOPOLITIQUE & MONDE
+    {"name": "Reuters",          "url": "https://feeds.reuters.com/reuters/topNews"},
+    {"name": "AP News",          "url": "https://rsshub.app/apnews/topics/apf-topnews"},
+    {"name": "BBC World",        "url": "https://feeds.bbci.co.uk/news/world/rss.xml"},
+    {"name": "Al Jazeera",       "url": "https://www.aljazeera.com/xml/rss/all.xml"},
+    {"name": "DW News",          "url": "https://rss.dw.com/rdf/rss-en-all"},
+    {"name": "UN News",          "url": "https://news.un.org/feed/subscribe/en/news/all/rss.xml"},
+    {"name": "The Guardian",     "url": "https://www.theguardian.com/world/rss"},
+    {"name": "Foreign Affairs",  "url": "https://www.foreignaffairs.com/rss.xml"},
+    {"name": "Euronews",         "url": "https://www.euronews.com/rss?level=theme&name=news"},
+    {"name": "RFI",              "url": "https://www.rfi.fr/fr/rss-podcasts/rss_actualites.xml"},
+    {"name": "Le Monde",         "url": "https://www.lemonde.fr/rss/une.xml"},
+    # POLITIQUE
+    {"name": "Politico",         "url": "https://rss.politico.com/politics-news.xml"},
+    {"name": "The Hill",         "url": "https://thehill.com/news/feed/"},
+    {"name": "White House",      "url": "https://www.whitehouse.gov/feed/"},
+    {"name": "NATO",             "url": "https://www.nato.int/cps/en/natohq/news.xml"},
+    # ECONOMIE & FINANCE
+    {"name": "MarketWatch",      "url": "https://feeds.content.dowjones.io/public/rss/mw_topstories"},
+    {"name": "Bloomberg",        "url": "https://feeds.bloomberg.com/markets/news.rss"},
+    {"name": "Financial Times",  "url": "https://www.ft.com/rss/home"},
+    {"name": "The Economist",    "url": "https://www.economist.com/latest/rss.xml"},
+    {"name": "Les Echos",        "url": "https://services.lesechos.fr/rss/les-echos-finance.xml"},
+    {"name": "Fed Reserve",      "url": "https://www.federalreserve.gov/feeds/press_all.xml"},
+    {"name": "IMF",              "url": "https://www.imf.org/en/News/rss?language=eng"},
+    # CRYPTO
+    {"name": "CoinDesk",         "url": "https://www.coindesk.com/arc/outboundfeeds/rss/"},
+    {"name": "Cointelegraph",    "url": "https://cointelegraph.com/rss"},
+    {"name": "The Block",        "url": "https://www.theblock.co/rss.xml"},
+    {"name": "Decrypt",          "url": "https://decrypt.co/feed"},
+    {"name": "Bitcoin Magazine", "url": "https://bitcoinmagazine.com/feed"},
+    # SPORT
+    {"name": "BBC Sport",        "url": "https://feeds.bbci.co.uk/sport/rss.xml"},
+    {"name": "ESPN",             "url": "https://www.espn.com/espn/rss/news"},
+    # REDDIT
+    {"name": "r/Polymarket",     "url": "https://www.reddit.com/r/Polymarket/hot.json?limit=15", "type": "reddit"},
+    {"name": "r/PredictionMarkets","url": "https://www.reddit.com/r/PredictionMarkets/hot.json?limit=10", "type": "reddit"},
+    {"name": "r/worldnews",      "url": "https://www.reddit.com/r/worldnews/hot.json?limit=15", "type": "reddit"},
+    {"name": "r/geopolitics",    "url": "https://www.reddit.com/r/geopolitics/hot.json?limit=10", "type": "reddit"},
+    {"name": "r/CryptoCurrency", "url": "https://www.reddit.com/r/CryptoCurrency/hot.json?limit=10", "type": "reddit"},
+    {"name": "r/investing",      "url": "https://www.reddit.com/r/investing/hot.json?limit=10", "type": "reddit"},
+    {"name": "r/politics",       "url": "https://www.reddit.com/r/politics/hot.json?limit=10", "type": "reddit"},
+    {"name": "r/europe",         "url": "https://www.reddit.com/r/europe/hot.json?limit=10", "type": "reddit"},
+    # TELEGRAM CHANNELS
+    {"name": "@BreakingNews",    "url": "https://rsshub.app/telegram/channel/BreakingNews"},
+    {"name": "@disclosetv",      "url": "https://rsshub.app/telegram/channel/disclosetv"},
+    {"name": "@sentdefender",    "url": "https://rsshub.app/telegram/channel/sentdefender"},
+    {"name": "@IntelSlava",      "url": "https://rsshub.app/telegram/channel/IntelSlava"},
+    {"name": "@CoinDeskNews",    "url": "https://rsshub.app/telegram/channel/CoinDeskNews"},
+    {"name": "@Cointelegraph",   "url": "https://rsshub.app/telegram/channel/cointelegraph"},
+    {"name": "@warnewsua",       "url": "https://rsshub.app/telegram/channel/warnewsua"},
+    {"name": "@BBCBreaking",     "url": "https://rsshub.app/telegram/channel/BBCBreaking"},
 ]
 
 def fetch_rss(src):
